@@ -129,7 +129,7 @@ export function createApp({ db, config }: { db: Db; config: Config }) {
     const s = await claude.create(user, {
       prompt: [
         prompt.trim(),
-        'You have full access to the bundled Dokploy hosting engine via the DevDash hosting MCP tools (`hosting_status`, `hosting_list`, `hosting_get`, `hosting_logs`, `hosting_create`, `hosting_update`, `hosting_domain_add`, `hosting_domain_remove`, `hosting_action`). Check `hosting_status` first, perform the requested create/edit/deploy action, and verify with `hosting_get` / `hosting_logs`.',
+        'You have full access to the bundled Dokploy hosting engine via the DevDash hosting MCP tools (`hosting_status`, `hosting_list`, `hosting_get`, `hosting_logs`, `hosting_create`, `hosting_files_list`, `hosting_files_upload`, `hosting_files_read`, `hosting_files_delete`, `hosting_update`, `hosting_db_create`, `hosting_domain_add`, `hosting_domain_remove`, `hosting_action`, `hosting_dokploy_api`, `hosting_monitor`). You can host apps from inline/uploaded files (`files`), a local server folder (`source_dir`), a Git repo (`git_url`), Docker image, or Compose stack, and configure the entry `start_file`, `start_command`, `install_command`, `runtime`, and `port`. Check `hosting_status` first, perform the requested action, and verify with `hosting_get` / `hosting_logs`.',
       ].join('\n\n'),
       images: [], cwd: '', profile: d?.profile ?? 'default', model: d?.model ?? null, effort: d?.effort ?? null,
       permissionMode: d?.permission_mode ?? 'bypassPermissions', mode: 'chat',

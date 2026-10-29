@@ -158,12 +158,36 @@ test('startBundledDokployDaemon runs on local port, serves Studio & API, and mon
     })
     assert.ok(dbCreated.id)
 
+    const fileApp = await hosting.create(user, {
+      name: 'uploaded-site',
+      source: {
+        type: 'files',
+        files: [
+          { path: 'index.html', content: '<!doctype html><html><body>Hello from uploaded app</body></html>' },
+          { path: 'server.js', content: 'console.log("ready")' },
+        ],
+      },
+      startFile: 'index.html',
+      runtime: 'static',
+      port: 33115,
+      deploy: true,
+    })
+    assert.ok(fileApp.id)
+
+    const listedFiles = await hosting.listFiles(fileApp.id)
+    assert.equal(listedFiles.startFile, 'index.html')
+    assert.equal(listedFiles.files.length, 2)
+
+    const readIndex = await hosting.readFile(fileApp.id, 'index.html')
+    assert.ok(readIndex.content.includes('Hello from uploaded app'))
+
     const snap = await monitor.snapshot()
-    assert.equal(snap.summary.total, 2)
-    assert.equal(snap.summary.appsCount, 1)
+    assert.equal(snap.summary.total, 3)
+    assert.equal(snap.summary.appsCount, 2)
     assert.equal(snap.summary.databasesCount, 1)
-    assert.equal(snap.items.length, 2)
+    assert.equal(snap.items.length, 3)
     assert.ok(snap.items.some((i) => i.name === 'demo-web'))
+    assert.ok(snap.items.some((i) => i.name === 'uploaded-site'))
     assert.ok(snap.items.some((i) => i.name === 'demo-pg' && i.kind === 'postgres'))
   } finally {
     daemon.close()

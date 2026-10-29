@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useMutation, useQuery, useQueryClient, queryOptions } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from '@tanstack/react-router'
-import { Activity, Database, ExternalLink, Globe, LayoutDashboard, Pencil, Play, Plus, RefreshCw, Rocket, Sparkles, Square, Trash2, X } from 'lucide-react'
+import { Activity, Database, ExternalLink, FileCode, FolderUp, Globe, LayoutDashboard, Pencil, Play, Plus, RefreshCw, Rocket, Sparkles, Square, Trash2, Upload, X } from 'lucide-react'
 import { StatusLight, type LightState } from '@/components/app/brand'
 import { confirmAction } from '@/components/app/confirm'
 import { NativeSelect } from '@/components/app/native-select'
@@ -531,19 +531,131 @@ function DokployStudioView({
   )
 }
 
-type SourceType = 'git' | 'docker' | 'compose'
-const EMPTY = { name: '', type: 'git' as SourceType, url: '', branch: 'main', buildPath: '/', image: '', compose: '', buildType: 'nixpacks', port: '3000', env: '', domain: '' }
+type SourceType = 'files' | 'git' | 'docker' | 'compose'
+type AppRuntime = 'auto' | 'node' | 'python' | 'static' | 'custom' | 'docker'
+type StagedFile = { path: string; content: string; encoding: 'utf8' | 'base64'; size: number }
+
+const EMPTY = {
+  name: '',
+  type: 'files' as SourceType,
+  url: '',
+  branch: 'main',
+  buildPath: '/',
+  image: '',
+  compose: '',
+  buildType: 'nixpacks',
+  runtime: 'auto' as AppRuntime,
+  startFile: '',
+  command: '',
+  installCommand: '',
+  sourceDir: '',
+  port: '3000',
+  env: '',
+  domain: '',
+}
+
+async function readBrowserFile(file: File): Promise<{ content: string; encoding: 'utf8' | 'base64'; size: number }> {
+  const buf = await file.arrayBuffer()
+  const bytes = new Uint8Array(buf)
+  const isText = /\.(js|mjs|cjs|ts|tsx|jsx|json|html|htm|css|scss|md|txt|py|sh|yml|yaml|toml|env| dockerfile|sql|go|rs|rb|php|xml|svg)$/i.test(file.name) || file.type.startsWith('text/')
+  if (isText && bytes.byteLength < 2_000_000) {
+    return { content: new TextDecoder().decode(bytes), encoding: 'utf8', size: bytes.byteLength }
+  }
+  let binary = ''
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]!)
+  return { content: btoa(binary), encoding: 'base64', size: bytes.byteLength }
+}
+
+function pickBestEntryFromPaths(paths: string[]): string {
+  const candidates = [
+    'server.js', 'index.js', 'app.js', 'main.js',
+    'src/server.js', 'src/index.js', 'src/app.js',
+    'server.ts', 'index.ts', 'main.ts', 'app.ts',
+    'src/index.ts', 'src/server.ts',
+    'app.py', 'main.py', 'server.py',
+    'index.html', 'public/index.html',
+  ]
+  for (const c of candidates) {
+    if (paths.includes(c)) return c
+  }
+  return paths.find((p) => /\.(js|mjs|ts|py|html)$/i.test(p)) ?? ''
+}
 
 function DeployDialog({ open, onOpenChange, domain }: { open: boolean; onOpenChange: (o: boolean) => void; domain: string | null }) {
   const qc = useQueryClient()
   const navigate = useNavigate()
   const [f, setF] = useState(EMPTY)
+  const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([])
+  const [archiveFile, setArchiveFile] = useState<{ name: string; base64: string; size: number } | null>(null)
+  const [inlinePath, setInlinePath] = useState('')
+  const [inlineContent, setInlineContent] = useState('')
+  const [addingInline, setAddingInline] = useState(false)
+
   const set = (p: Partial<typeof EMPTY>) => setF((x) => ({ ...x, ...p }))
+
+  const handleFilesSelected = async (fileList: FileList | null) => {
+    if (!fileList || !fileList.length) return
+    if (fileList.length === 1 && /\.(zip|tar\.gz|tgz|tar)$/i.test(fileList[0]!.name)) {
+      const r = await readBrowserFile(fileList[0]!)
+      const b64 = r.encoding === 'base64' ? r.content : btoa(r.content)
+      setArchiveFile({ name: fileList[0]!.name, base64: b64, size: r.size })
+      if (!f.name) {
+        const base = fileList[0]!.name.replace(/\.(zip|tar\.gz|tgz|tar)$/i, '').toLowerCase().replace(/[^a-z0-9-]/g, '-')
+        if (base) set({ name: base })
+      }
+      return
+    }
+    const next: StagedFile[] = [...stagedFiles]
+    for (const file of Array.from(fileList)) {
+      const relRaw = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
+      // Strip top-level folder prefix if uploading a folder via webkitdirectory
+      const parts = relRaw.replace(/\\/g, '/').split('/')
+      const rel = parts.length > 1 ? parts.slice(1).join('/') : parts[0]!
+      if (rel.includes('node_modules/') || rel.startsWith('.git/')) continue
+      const r = await readBrowserFile(file)
+      const idx = next.findIndex((x) => x.path === rel)
+      const item: StagedFile = { path: rel, content: r.content, encoding: r.encoding, size: r.size }
+      if (idx >= 0) next[idx] = item
+      else next.push(item)
+    }
+    setStagedFiles(next)
+    if (!f.startFile) {
+      const detected = pickBestEntryFromPaths(next.map((x) => x.path))
+      if (detected) set({ startFile: detected })
+    }
+  }
+
+  const addInlineFile = () => {
+    const p = inlinePath.trim().replace(/^\/+/, '')
+    if (!p) return
+    const next = [...stagedFiles.filter((x) => x.path !== p), { path: p, content: inlineContent, encoding: 'utf8' as const, size: inlineContent.length }]
+    setStagedFiles(next)
+    if (!f.startFile) set({ startFile: p })
+    setInlinePath('')
+    setInlineContent('')
+    setAddingInline(false)
+  }
+
   const create = useMutation({
     mutationFn: () => unwrap(api.api.hosting.apps.$post({ json: {
-      name: f.name, env: f.env || undefined, domain: f.domain || null, port: Number(f.port) || undefined,
+      name: f.name,
+      env: f.env || undefined,
+      domain: f.domain || null,
+      port: Number(f.port) || undefined,
       buildType: f.type === 'git' ? f.buildType as 'nixpacks' : undefined,
-      source: f.type === 'git'
+      runtime: (f.type === 'files' || f.type === 'git') ? f.runtime : undefined,
+      startFile: f.startFile.trim() || null,
+      command: f.command.trim() || null,
+      installCommand: f.installCommand.trim() || null,
+      source: f.type === 'files'
+        ? {
+            type: 'files',
+            files: stagedFiles.length ? stagedFiles.map((s) => ({ path: s.path, content: s.content, encoding: s.encoding })) : undefined,
+            archiveBase64: archiveFile?.base64,
+            archiveName: archiveFile?.name,
+            sourceDir: f.sourceDir.trim() || undefined,
+          }
+        : f.type === 'git'
         ? { type: 'git', url: f.url, branch: f.branch || undefined, buildPath: f.buildPath || undefined }
         : f.type === 'docker'
         ? { type: 'docker', image: f.image }
@@ -551,26 +663,129 @@ function DeployDialog({ open, onOpenChange, domain }: { open: boolean; onOpenCha
     } })),
     onSuccess: (r) => {
       void qc.invalidateQueries({ queryKey: ['hosting'] })
-      onOpenChange(false); setF(EMPTY)
+      onOpenChange(false)
+      setF(EMPTY)
+      setStagedFiles([])
+      setArchiveFile(null)
       void navigate({ to: '/hosting/$kind/$id', params: { kind: r.kind, id: r.id } })
     },
   })
   const submit = (e: FormEvent) => { e.preventDefault(); create.mutate() }
   const slug = f.name.toLowerCase().replace(/[^a-z0-9-]+/g, '-')
+  const candidateEntries = stagedFiles.filter((s) => /\.(js|mjs|cjs|ts|py|html|sh)$/i.test(s.path)).map((s) => s.path)
 
   return (
-    <ResponsiveDialog open={open} onOpenChange={onOpenChange} title="Deploy to Dokploy" description="Creates the app in the bundled Dokploy engine and deploys it right away.">
+    <ResponsiveDialog open={open} onOpenChange={onOpenChange} title="Deploy to Dokploy" description="Upload your own files/folder, connect a Git repository, or run a Docker/Compose stack and choose how it starts.">
       <form onSubmit={submit}>
         <FieldGroup>
           <Field>
             <FieldLabel htmlFor="h-name">Name</FieldLabel>
-            <Input id="h-name" required className="h-10 font-mono" placeholder="my-site" value={f.name} onChange={(e) => set({ name: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-') })} />
+            <Input id="h-name" required className="h-10 font-mono" placeholder="my-app" value={f.name} onChange={(e) => set({ name: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-') })} />
           </Field>
           <ToggleGroup type="single" variant="outline" size="sm" value={f.type} onValueChange={(v) => v && set({ type: v as SourceType })} aria-label="Source">
-            <ToggleGroupItem value="git">Git repository</ToggleGroupItem>
+            <ToggleGroupItem value="files"><Upload className="size-3.5 mr-1" />Upload / Files</ToggleGroupItem>
+            <ToggleGroupItem value="git">Git repo</ToggleGroupItem>
             <ToggleGroupItem value="docker">Docker image</ToggleGroupItem>
             <ToggleGroupItem value="compose">Compose</ToggleGroupItem>
           </ToggleGroup>
+
+          {f.type === 'files' && (
+            <div className="flex flex-col gap-3 rounded-xl border bg-muted/20 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-medium">Upload files, folder, or .zip archive</span>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <label className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border bg-background px-2.5 text-xs font-medium hover:bg-muted">
+                    <Upload className="size-3.5" />Files / .zip
+                    <input type="file" multiple className="hidden" onChange={(e) => void handleFilesSelected(e.target.files)} />
+                  </label>
+                  <label className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border bg-background px-2.5 text-xs font-medium hover:bg-muted">
+                    <FolderUp className="size-3.5" />Folder
+                    <input
+                      type="file"
+                      multiple
+                      // @ts-expect-error webkitdirectory is standard in browsers
+                      webkitdirectory=""
+                      className="hidden"
+                      onChange={(e) => void handleFilesSelected(e.target.files)}
+                    />
+                  </label>
+                  <Button type="button" size="xs" variant="outline" onClick={() => setAddingInline((v) => !v)}>
+                    <FileCode className="size-3.5" />+ Write File
+                  </Button>
+                </div>
+              </div>
+
+              {addingInline && (
+                <div className="flex flex-col gap-2 rounded-lg border bg-background p-2.5">
+                  <Input
+                    className="h-8 font-mono text-xs"
+                    placeholder="File path, e.g. server.js or index.html"
+                    value={inlinePath}
+                    onChange={(e) => setInlinePath(e.target.value)}
+                  />
+                  <Textarea
+                    rows={5}
+                    className="font-mono text-xs"
+                    placeholder="Paste or write file contents here..."
+                    value={inlineContent}
+                    onChange={(e) => setInlineContent(e.target.value)}
+                  />
+                  <div className="flex justify-end gap-1.5">
+                    <Button type="button" size="xs" variant="ghost" onClick={() => setAddingInline(false)}>Cancel</Button>
+                    <Button type="button" size="xs" onClick={addInlineFile} disabled={!inlinePath.trim()}>Add File</Button>
+                  </div>
+                </div>
+              )}
+
+              {archiveFile && (
+                <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-1.5 text-xs font-mono">
+                  <span>Archive: <strong>{archiveFile.name}</strong> ({Math.ceil(archiveFile.size / 1024)} KB)</span>
+                  <Button type="button" size="icon" variant="ghost" className="size-6" onClick={() => setArchiveFile(null)}><X className="size-3" /></Button>
+                </div>
+              )}
+
+              {stagedFiles.length > 0 && (
+                <div className="max-h-36 overflow-y-auto divide-y rounded-lg border bg-background text-xs">
+                  {stagedFiles.map((sf) => (
+                    <div key={sf.path} className="flex items-center justify-between px-2.5 py-1.5">
+                      <span className="truncate font-mono">{sf.path} <span className="text-muted-foreground">({sf.size} B)</span></span>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant={f.startFile === sf.path ? 'default' : 'ghost'}
+                          onClick={() => set({ startFile: sf.path })}
+                        >
+                          {f.startFile === sf.path ? 'Start File ✓' : 'Set Start'}
+                        </Button>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          className="size-6"
+                          onClick={() => setStagedFiles((list) => list.filter((x) => x.path !== sf.path))}
+                        >
+                          <X className="size-3" />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <Field>
+                <FieldLabel htmlFor="h-srcdir">Or Server Directory Path (optional)</FieldLabel>
+                <Input
+                  id="h-srcdir"
+                  className="h-9 font-mono text-xs"
+                  placeholder="e.g. /srv/devdash/projects/my-app or C:\path\to\app"
+                  value={f.sourceDir}
+                  onChange={(e) => set({ sourceDir: e.target.value })}
+                />
+              </Field>
+            </div>
+          )}
+
           {f.type === 'git' && <>
             <Field>
               <FieldLabel htmlFor="h-url">Repository URL</FieldLabel>
@@ -611,6 +826,71 @@ function DeployDialog({ open, onOpenChange, domain }: { open: boolean; onOpenCha
               <FieldDescription>Add domains after creation or ask Claude Code to configure service domains.</FieldDescription>
             </Field>
           )}
+
+          {(f.type === 'files' || f.type === 'git') && (
+            <div className="grid gap-3 rounded-xl border bg-card p-3">
+              <div className="grid grid-cols-2 gap-3">
+                <Field>
+                  <FieldLabel htmlFor="h-runtime">Runtime</FieldLabel>
+                  <NativeSelect id="h-runtime" className="[&_select]:h-9" value={f.runtime} onChange={(e) => set({ runtime: e.target.value as AppRuntime })}>
+                    <option value="auto">Auto-detect</option>
+                    <option value="node">Node.js / TypeScript</option>
+                    <option value="python">Python</option>
+                    <option value="static">Static HTTP Server (HTML)</option>
+                    <option value="custom">Custom Start Command</option>
+                  </NativeSelect>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="h-startfile">Start File (Entrypoint)</FieldLabel>
+                  <Input
+                    id="h-startfile"
+                    className="h-9 font-mono text-xs"
+                    placeholder="e.g. server.js, main.py, index.html"
+                    value={f.startFile}
+                    onChange={(e) => set({ startFile: e.target.value })}
+                  />
+                </Field>
+              </div>
+              {candidateEntries.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1 text-[11px]">
+                  <span className="text-muted-foreground mr-1">Pick entry file:</span>
+                  {candidateEntries.slice(0, 6).map((p) => (
+                    <Badge
+                      key={p}
+                      variant={f.startFile === p ? 'default' : 'secondary'}
+                      className="cursor-pointer font-mono text-[10px]"
+                      onClick={() => set({ startFile: p })}
+                    >
+                      {p}
+                    </Badge>
+                  ))}
+                </div>
+              )}
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Field>
+                  <FieldLabel htmlFor="h-startcmd">Start Command (optional override)</FieldLabel>
+                  <Input
+                    id="h-startcmd"
+                    className="h-9 font-mono text-xs"
+                    placeholder="e.g. node src/index.js or npm start"
+                    value={f.command}
+                    onChange={(e) => set({ command: e.target.value })}
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="h-installcmd">Install / Build Command (optional)</FieldLabel>
+                  <Input
+                    id="h-installcmd"
+                    className="h-9 font-mono text-xs"
+                    placeholder="e.g. npm install && npm run build"
+                    value={f.installCommand}
+                    onChange={(e) => set({ installCommand: e.target.value })}
+                  />
+                </Field>
+              </div>
+            </div>
+          )}
+
           {f.type !== 'compose' && (
             <div className="grid grid-cols-[6rem_1fr] gap-3">
               <Field>
@@ -619,13 +899,13 @@ function DeployDialog({ open, onOpenChange, domain }: { open: boolean; onOpenCha
               </Field>
               <Field>
                 <FieldLabel htmlFor="h-domain">Domain</FieldLabel>
-                <Input id="h-domain" className="h-10 font-mono" placeholder={domain ? `${slug || 'name'}.${domain}` : 'automatic (traefik.me)'} value={f.domain} onChange={(e) => set({ domain: e.target.value })} />
+                <Input id="h-domain" className="h-10 font-mono" placeholder={domain ? `${slug || 'name'}.${domain}` : `http://127.0.0.1:${f.port || '3000'}`} value={f.domain} onChange={(e) => set({ domain: e.target.value })} />
               </Field>
             </div>
           )}
           <Field>
             <FieldLabel htmlFor="h-env">Environment</FieldLabel>
-            <Textarea id="h-env" rows={3} className="font-mono text-xs" placeholder="KEY=value" value={f.env} onChange={(e) => set({ env: e.target.value })} />
+            <Textarea id="h-env" rows={2} className="font-mono text-xs" placeholder="KEY=value" value={f.env} onChange={(e) => set({ env: e.target.value })} />
           </Field>
           <ErrorAlert error={create.error} />
           <Button type="submit" className="h-10" disabled={!f.name || create.isPending}><Rocket />{create.isPending ? 'Deploying…' : 'Deploy'}</Button>
@@ -757,13 +1037,16 @@ export function HostedAppPage({ kind, id }: { kind: Kind; id: string }) {
           </section>
           <section className="grid gap-1.5 rounded-lg border p-3 text-sm">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Configuration</span>
+              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Configuration &amp; Startup</span>
               <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setEditing(true)}><Pencil className="size-3 mr-1" />Edit configuration</Button>
             </div>
+            <div><span className="text-muted-foreground">Source: </span><span className="font-mono">{a.source || kind}</span>{a.runtime && a.runtime !== 'auto' ? <span className="text-muted-foreground"> · Runtime: <strong className="font-mono text-foreground">{a.runtime}</strong></span> : null}{a.port ? <span className="text-muted-foreground"> · Port: <strong className="font-mono text-foreground">{a.port}</strong></span> : null}</div>
+            {a.startFile && <div><span className="text-muted-foreground">Start file (Entrypoint): </span><Badge variant="secondary" className="font-mono text-xs">{a.startFile}</Badge></div>}
+            {a.command && <div><span className="text-muted-foreground">Start command: </span><span className="font-mono">{a.command}</span></div>}
+            {a.installCommand && <div><span className="text-muted-foreground">Install / build command: </span><span className="font-mono">{a.installCommand}</span></div>}
             {a.repository && <div><span className="text-muted-foreground">Repository: </span><span className="font-mono">{a.repository}{a.branch ? ` @ ${a.branch}` : ''}{a.buildPath && a.buildPath !== '/' ? ` (${a.buildPath})` : ''}</span></div>}
-            {a.buildType && <div><span className="text-muted-foreground">Build type: </span><span className="font-mono">{a.buildType}{a.dockerfile ? ` (${a.dockerfile})` : ''}</span></div>}
+            {a.buildType && a.source === 'git' && <div><span className="text-muted-foreground">Build type: </span><span className="font-mono">{a.buildType}{a.dockerfile ? ` (${a.dockerfile})` : ''}</span></div>}
             {a.image && <div><span className="text-muted-foreground">Docker image: </span><span className="font-mono">{a.image}</span></div>}
-            {a.command && <div><span className="text-muted-foreground">Command: </span><span className="font-mono">{a.command}</span></div>}
             {a.env && (
               <div className="mt-1">
                 <div className="text-xs text-muted-foreground mb-1">Environment variables</div>
@@ -777,6 +1060,7 @@ export function HostedAppPage({ kind, id }: { kind: Kind; id: string }) {
               </div>
             )}
           </section>
+          {kind === 'application' && <HostedAppFilesSection appId={id} startFile={a.startFile ?? null} />}
           {failed && (
             <Alert variant="destructive">
               <AlertTitle>The last deploy failed</AlertTitle>
@@ -821,10 +1105,207 @@ export function HostedAppPage({ kind, id }: { kind: Kind; id: string }) {
           <EditHostedAppDialog open={editing} onOpenChange={setEditing} kind={kind} id={id} app={a} />
           <AddDomainDialog open={addingDomain} onOpenChange={setAddingDomain} kind={kind} id={id} />
           <AskClaudeDialog open={asking} onOpenChange={setAsking}
-            initial={`Inspect and manage the hosted ${kind} "${a.name}" (id: ${id}, kind: ${kind}). Read its current configuration with hosting_get and latest logs with hosting_logs, then make the requested edits with hosting_update / hosting_domain_add and redeploy.`} />
+            initial={`Inspect and manage the hosted ${kind} "${a.name}" (id: ${id}, kind: ${kind}). Read its current configuration with hosting_get, workspace files with hosting_files_list, and latest logs with hosting_logs, then make the requested edits with hosting_files_upload / hosting_update / hosting_domain_add and redeploy.`} />
         </>
       )}
     </>
+  )
+}
+
+function HostedAppFilesSection({ appId, startFile }: { appId: string; startFile: string | null }) {
+  const qc = useQueryClient()
+  const filesQ = useQuery({
+    queryKey: ['hosting', 'app', 'application', appId, 'files'],
+    queryFn: () => unwrap(api.api.hosting.apps.application[':id'].files.$get({ param: { id: appId } })),
+  })
+  const [editingFile, setEditingFile] = useState<{ path: string; content: string; isNew?: boolean } | null>(null)
+
+  const upload = useMutation({
+    mutationFn: (payload: {
+      files?: { path: string; content: string; encoding?: 'utf8' | 'base64' }[]
+      archiveBase64?: string
+      archiveName?: string
+      startFile?: string | null
+      redeploy?: boolean
+    }) => unwrap(api.api.hosting.apps.application[':id'].files.$post({ param: { id: appId }, json: payload })),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['hosting'] })
+      setEditingFile(null)
+    },
+  })
+
+  const openFile = useMutation({
+    mutationFn: (path: string) => unwrap(api.api.hosting.apps.application[':id'].files.read.$post({ param: { id: appId }, json: { path } })),
+    onSuccess: (r) => setEditingFile({ path: r.path, content: r.content }),
+  })
+
+  const delFile = useMutation({
+    mutationFn: (path: string) => unwrap(api.api.hosting.apps.application[':id'].files.delete.$post({ param: { id: appId }, json: { path } })),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['hosting', 'app', 'application', appId, 'files'] }),
+  })
+
+  const onSelectUpload = async (fileList: FileList | null) => {
+    if (!fileList || !fileList.length) return
+    if (fileList.length === 1 && /\.(zip|tar\.gz|tgz|tar)$/i.test(fileList[0]!.name)) {
+      const r = await readBrowserFile(fileList[0]!)
+      const b64 = r.encoding === 'base64' ? r.content : btoa(r.content)
+      upload.mutate({ archiveBase64: b64, archiveName: fileList[0]!.name, redeploy: true })
+      return
+    }
+    const items: { path: string; content: string; encoding: 'utf8' | 'base64' }[] = []
+    for (const file of Array.from(fileList)) {
+      const relRaw = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
+      const parts = relRaw.replace(/\\/g, '/').split('/')
+      const rel = parts.length > 1 ? parts.slice(1).join('/') : parts[0]!
+      if (rel.includes('node_modules/') || rel.startsWith('.git/')) continue
+      const r = await readBrowserFile(file)
+      items.push({ path: rel, content: r.content, encoding: r.encoding })
+    }
+    if (items.length) upload.mutate({ files: items, redeploy: true })
+  }
+
+  const files = filesQ.data?.files ?? []
+  const activeStart = startFile ?? filesQ.data?.startFile ?? null
+
+  return (
+    <section className="flex flex-col gap-2 rounded-lg border p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-medium">Workspace Files &amp; Entrypoint ({files.length})</h2>
+          {filesQ.data?.workDir && <p className="font-mono text-[11px] text-muted-foreground">{filesQ.data.workDir}</p>}
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <label className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border bg-background px-2.5 text-xs font-medium hover:bg-muted">
+            <Upload className="size-3.5" />Upload Files / .zip
+            <input type="file" multiple className="hidden" onChange={(e) => void onSelectUpload(e.target.files)} />
+          </label>
+          <label className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border bg-background px-2.5 text-xs font-medium hover:bg-muted">
+            <FolderUp className="size-3.5" />Upload Folder
+            <input
+              type="file"
+              multiple
+              // @ts-expect-error webkitdirectory is standard in browsers
+              webkitdirectory=""
+              className="hidden"
+              onChange={(e) => void onSelectUpload(e.target.files)}
+            />
+          </label>
+          <Button size="sm" variant="outline" className="h-8 text-xs" onClick={() => setEditingFile({ path: '', content: '', isNew: true })}>
+            <Plus className="size-3.5" />New File
+          </Button>
+        </div>
+      </div>
+
+      <ErrorAlert error={filesQ.error ?? upload.error ?? openFile.error ?? delFile.error} />
+
+      {!files.length ? (
+        <p className="rounded border bg-muted/20 px-3 py-3 text-xs text-muted-foreground">
+          No files in this app's workspace yet. Upload files, a folder, or a .zip archive, or click New File to create your start file.
+        </p>
+      ) : (
+        <div className="max-h-64 overflow-y-auto divide-y rounded-md border bg-background text-xs">
+          {files.map((f) => {
+            const isStart = activeStart === f.path
+            return (
+              <div key={f.path} className="flex items-center justify-between gap-2 px-3 py-1.5 hover:bg-muted/20">
+                <div className="flex items-center gap-2 min-w-0">
+                  <FileCode className="size-3.5 shrink-0 text-muted-foreground" />
+                  <button
+                    type="button"
+                    className="truncate font-mono text-left hover:underline underline-offset-4"
+                    onClick={() => openFile.mutate(f.path)}
+                  >
+                    {f.path}
+                  </button>
+                  <span className="font-mono text-[10px] text-muted-foreground">({f.size} B)</span>
+                  {isStart && <Badge variant="default" className="font-mono text-[10px]">Start File ✓</Badge>}
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  {!isStart && (
+                    <Button
+                      size="xs"
+                      variant="ghost"
+                      disabled={upload.isPending}
+                      onClick={() => upload.mutate({ startFile: f.path, redeploy: true })}
+                    >
+                      Set as Start File
+                    </Button>
+                  )}
+                  <Button size="xs" variant="ghost" onClick={() => openFile.mutate(f.path)}>Edit</Button>
+                  <Button size="icon" variant="ghost" className="size-6" onClick={() => delFile.mutate(f.path)} aria-label="Delete file">
+                    <Trash2 className="size-3" />
+                  </Button>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      <ResponsiveDialog
+        open={!!editingFile}
+        onOpenChange={(o) => { if (!o) setEditingFile(null) }}
+        title={editingFile?.isNew ? 'Create File in Hosted App' : `Edit ${editingFile?.path ?? ''}`}
+        description="Saves the file into the hosted app workspace and redeploys."
+      >
+        {editingFile && (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (!editingFile.path.trim()) return
+              upload.mutate({
+                files: [{ path: editingFile.path.trim(), content: editingFile.content, encoding: 'utf8' }],
+                redeploy: true,
+              })
+            }}
+          >
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor="wf-path">File Path</FieldLabel>
+                <Input
+                  id="wf-path"
+                  required
+                  disabled={!editingFile.isNew}
+                  className="h-9 font-mono text-xs"
+                  placeholder="e.g. server.js or src/index.ts"
+                  value={editingFile.path}
+                  onChange={(e) => setEditingFile({ ...editingFile, path: e.target.value })}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="wf-content">Contents</FieldLabel>
+                <Textarea
+                  id="wf-content"
+                  rows={12}
+                  className="font-mono text-xs"
+                  value={editingFile.content}
+                  onChange={(e) => setEditingFile({ ...editingFile, content: e.target.value })}
+                />
+              </Field>
+              <div className="flex justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={!editingFile.path.trim() || upload.isPending}
+                  onClick={() =>
+                    upload.mutate({
+                      files: [{ path: editingFile.path.trim(), content: editingFile.content, encoding: 'utf8' }],
+                      startFile: editingFile.path.trim(),
+                      redeploy: true,
+                    })
+                  }
+                >
+                  Save as Start File &amp; Redeploy
+                </Button>
+                <Button type="submit" disabled={!editingFile.path.trim() || upload.isPending}>
+                  <Rocket />{upload.isPending ? 'Saving…' : 'Save & Redeploy'}
+                </Button>
+              </div>
+            </FieldGroup>
+          </form>
+        )}
+      </ResponsiveDialog>
+    </section>
   )
 }
 
@@ -833,7 +1314,9 @@ function EditHostedAppDialog({ open, onOpenChange, kind, id, app }: {
   app: {
     name: string; source: string | null; buildType: string | null; dockerfile?: string | null
     repository: string | null; branch: string | null; buildPath?: string | null
-    image: string | null; composeFile: string | null; command?: string | null; env: string
+    image: string | null; composeFile: string | null; command?: string | null
+    startFile?: string | null; installCommand?: string | null; runtime?: string | null; port?: number | null
+    env: string
   }
 }) {
   const qc = useQueryClient()
@@ -845,7 +1328,11 @@ function EditHostedAppDialog({ open, onOpenChange, kind, id, app }: {
   const [dockerfile, setDockerfile] = useState(app.dockerfile ?? '')
   const [dockerImage, setDockerImage] = useState(app.image ?? '')
   const [composeFile, setComposeFile] = useState(app.composeFile ?? '')
+  const [runtime, setRuntime] = useState<AppRuntime>((app.runtime as AppRuntime) || 'auto')
+  const [startFile, setStartFile] = useState(app.startFile ?? '')
   const [command, setCommand] = useState(app.command ?? '')
+  const [installCommand, setInstallCommand] = useState(app.installCommand ?? '')
+  const [port, setPort] = useState(String(app.port ?? 3000))
   const [env, setEnv] = useState(app.env ?? '')
 
   useEffect(() => {
@@ -858,7 +1345,11 @@ function EditHostedAppDialog({ open, onOpenChange, kind, id, app }: {
       setDockerfile(app.dockerfile ?? '')
       setDockerImage(app.image ?? '')
       setComposeFile(app.composeFile ?? '')
+      setRuntime((app.runtime as AppRuntime) || 'auto')
+      setStartFile(app.startFile ?? '')
       setCommand(app.command ?? '')
+      setInstallCommand(app.installCommand ?? '')
+      setPort(String(app.port ?? 3000))
       setEnv(app.env ?? '')
     }
   }, [open, app])
@@ -884,6 +1375,10 @@ function EditHostedAppDialog({ open, onOpenChange, kind, id, app }: {
               dockerfile: dockerfile.trim() || undefined,
             }
           : {}),
+        runtime: kind === 'application' ? runtime : undefined,
+        startFile: kind === 'application' ? (startFile.trim() || null) : undefined,
+        installCommand: kind === 'application' ? (installCommand.trim() || null) : undefined,
+        port: kind === 'application' ? (Number(port) || 3000) : undefined,
         command: command.trim() || null,
         env,
         redeploy,
@@ -897,13 +1392,21 @@ function EditHostedAppDialog({ open, onOpenChange, kind, id, app }: {
 
   return (
     <ResponsiveDialog open={open} onOpenChange={onOpenChange} title={`Edit ${app.name}`}
-      description="Updates this app directly in the bundled Dokploy engine.">
+      description="Update start file, start command, runtime, port, or source settings in Dokploy.">
       <form onSubmit={(e) => { e.preventDefault(); save.mutate(false) }}>
         <FieldGroup>
-          <Field>
-            <FieldLabel htmlFor="eh-name">Name</FieldLabel>
-            <Input id="eh-name" className="h-10 font-mono" value={name} onChange={(e) => setName(e.target.value)} />
-          </Field>
+          <div className="grid grid-cols-[1fr_7rem] gap-3">
+            <Field>
+              <FieldLabel htmlFor="eh-name">Name</FieldLabel>
+              <Input id="eh-name" className="h-10 font-mono" value={name} onChange={(e) => setName(e.target.value)} />
+            </Field>
+            {kind === 'application' && (
+              <Field>
+                <FieldLabel htmlFor="eh-port">Port</FieldLabel>
+                <Input id="eh-port" inputMode="numeric" className="h-10 font-mono" value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ''))} />
+              </Field>
+            )}
+          </div>
           {kind === 'compose' ? (
             <Field>
               <FieldLabel htmlFor="eh-compose">docker-compose.yml</FieldLabel>
@@ -911,8 +1414,35 @@ function EditHostedAppDialog({ open, onOpenChange, kind, id, app }: {
             </Field>
           ) : (
             <>
+              <div className="grid grid-cols-2 gap-3">
+                <Field>
+                  <FieldLabel htmlFor="eh-runtime">Runtime</FieldLabel>
+                  <NativeSelect id="eh-runtime" className="[&_select]:h-10" value={runtime} onChange={(e) => setRuntime(e.target.value as AppRuntime)}>
+                    <option value="auto">Auto-detect</option>
+                    <option value="node">Node.js / TypeScript</option>
+                    <option value="python">Python</option>
+                    <option value="static">Static HTTP Server (HTML)</option>
+                    <option value="custom">Custom Start Command</option>
+                    <option value="docker">Docker</option>
+                  </NativeSelect>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="eh-startfile">Start File (Entrypoint)</FieldLabel>
+                  <Input id="eh-startfile" className="h-10 font-mono text-xs" placeholder="server.js / main.py / index.html" value={startFile} onChange={(e) => setStartFile(e.target.value)} />
+                </Field>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field>
+                  <FieldLabel htmlFor="eh-cmd">Start Command (optional override)</FieldLabel>
+                  <Input id="eh-cmd" className="h-10 font-mono text-xs" placeholder="node server.js / npm run start" value={command} onChange={(e) => setCommand(e.target.value)} />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="eh-install">Install / Build Command</FieldLabel>
+                  <Input id="eh-install" className="h-10 font-mono text-xs" placeholder="npm install" value={installCommand} onChange={(e) => setInstallCommand(e.target.value)} />
+                </Field>
+              </div>
               <Field>
-                <FieldLabel htmlFor="eh-url">Git repository URL (if Git-based)</FieldLabel>
+                <FieldLabel htmlFor="eh-url">Git repository URL (optional)</FieldLabel>
                 <Input id="eh-url" className="h-10 font-mono" placeholder="https://github.com/me/app.git" value={url} onChange={(e) => setUrl(e.target.value)} />
               </Field>
               {url.trim() && (
@@ -939,18 +1469,14 @@ function EditHostedAppDialog({ open, onOpenChange, kind, id, app }: {
                 </div>
               )}
               <Field>
-                <FieldLabel htmlFor="eh-image">Docker image (if image-based)</FieldLabel>
+                <FieldLabel htmlFor="eh-image">Docker image (optional)</FieldLabel>
                 <Input id="eh-image" className="h-10 font-mono" placeholder="nginx:alpine" value={dockerImage} onChange={(e) => setDockerImage(e.target.value)} />
               </Field>
             </>
           )}
           <Field>
-            <FieldLabel htmlFor="eh-cmd">Custom command (optional)</FieldLabel>
-            <Input id="eh-cmd" className="h-10 font-mono" placeholder="npm run start" value={command} onChange={(e) => setCommand(e.target.value)} />
-          </Field>
-          <Field>
             <FieldLabel htmlFor="eh-env">Environment variables</FieldLabel>
-            <Textarea id="eh-env" rows={4} className="font-mono text-xs" placeholder="KEY=value" value={env} onChange={(e) => setEnv(e.target.value)} />
+            <Textarea id="eh-env" rows={3} className="font-mono text-xs" placeholder="KEY=value" value={env} onChange={(e) => setEnv(e.target.value)} />
           </Field>
           <ErrorAlert error={save.error} />
           <div className="flex items-center justify-end gap-2">

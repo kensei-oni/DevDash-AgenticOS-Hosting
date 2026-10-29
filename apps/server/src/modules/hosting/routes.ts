@@ -14,6 +14,14 @@ const KindP = {
   },
 }
 
+const UploadedFileZ = z.object({
+  path: z.string().min(1).max(400),
+  content: z.string().max(15_000_000),
+  encoding: z.enum(['utf8', 'base64']).optional(),
+})
+
+const RuntimeZ = z.enum(['auto', 'node', 'python', 'static', 'custom', 'docker'])
+
 const Create = z.object({
   name: z.string().min(1).max(41),
   project: z.string().max(60).optional(),
@@ -21,9 +29,20 @@ const Create = z.object({
     z.object({ type: z.literal('git'), url: z.string().min(4).max(500), branch: z.string().max(200).optional(), buildPath: z.string().max(300).optional() }),
     z.object({ type: z.literal('docker'), image: z.string().min(1).max(300) }),
     z.object({ type: z.literal('compose'), file: z.string().min(1).max(100_000) }),
+    z.object({
+      type: z.literal('files'),
+      files: z.array(UploadedFileZ).max(500).optional(),
+      archiveBase64: z.string().max(30_000_000).optional(),
+      archiveName: z.string().max(200).optional(),
+      sourceDir: z.string().max(500).optional(),
+    }),
   ]),
   buildType: z.enum(['nixpacks', 'dockerfile', 'railpack', 'heroku_buildpacks', 'paketo_buildpacks', 'static']).optional(),
   dockerfile: z.string().max(300).optional(),
+  startFile: z.string().max(300).nullable().optional(),
+  installCommand: z.string().max(2000).nullable().optional(),
+  command: z.string().max(2000).nullable().optional(),
+  runtime: RuntimeZ.optional(),
   port: z.number().int().min(1).max(65535).optional(),
   env: z.string().max(50_000).optional(),
   domain: z.string().max(253).nullable().optional(),
@@ -41,9 +60,31 @@ const Update = z.object({
   composeFile: z.string().max(100_000).optional(),
   env: z.string().max(50_000).optional(),
   command: z.string().max(2000).nullable().optional(),
+  startFile: z.string().max(300).nullable().optional(),
+  installCommand: z.string().max(2000).nullable().optional(),
+  runtime: RuntimeZ.optional(),
+  port: z.number().int().min(1).max(65535).optional(),
   memoryLimit: z.string().max(40).nullable().optional(),
   cpuLimit: z.string().max(40).nullable().optional(),
   redeploy: z.boolean().optional(),
+})
+
+const UploadFiles = z.object({
+  files: z.array(UploadedFileZ).max(500).optional(),
+  archiveBase64: z.string().max(30_000_000).optional(),
+  archiveName: z.string().max(200).optional(),
+  sourceDir: z.string().max(500).optional(),
+  clearExisting: z.boolean().optional(),
+  startFile: z.string().max(300).nullable().optional(),
+  installCommand: z.string().max(2000).nullable().optional(),
+  command: z.string().max(2000).nullable().optional(),
+  runtime: RuntimeZ.optional(),
+  port: z.number().int().min(1).max(65535).optional(),
+  redeploy: z.boolean().optional(),
+})
+
+const FilePathBody = z.object({
+  path: z.string().min(1).max(400),
 })
 
 const AddDomain = z.object({
@@ -107,6 +148,13 @@ export function hostingRoutes(
     })
     .patch('/apps/:kind/:id', json(Update), async (c) =>
       c.json(await hosting.update(c.get('user'), KindP.parse(c.req.param('kind')), c.req.param('id'), c.req.valid('json'))))
+    .get('/apps/application/:id/files', async (c) => c.json(await hosting.listFiles(c.req.param('id'))))
+    .post('/apps/application/:id/files', json(UploadFiles), async (c) =>
+      c.json(await hosting.uploadFiles(c.get('user'), c.req.param('id'), c.req.valid('json'))))
+    .post('/apps/application/:id/files/read', json(FilePathBody), async (c) =>
+      c.json(await hosting.readFile(c.req.param('id'), c.req.valid('json').path)))
+    .post('/apps/application/:id/files/delete', json(FilePathBody), async (c) =>
+      c.json(await hosting.deleteFile(c.req.param('id'), c.req.valid('json').path)))
     .post('/apps/:kind/:id/domains', json(AddDomain), async (c) =>
       c.json(await hosting.addDomain(KindP.parse(c.req.param('kind')), c.req.param('id'), c.req.valid('json'))))
     .delete('/domains/:domainId', async (c) => c.json(await hosting.removeDomain(c.req.param('domainId'))))

@@ -37,10 +37,23 @@ export type HostedApp = {
   environment: string
   url?: string | null
 }
+export type UploadedFileInput = {
+  path: string
+  content: string
+  encoding?: 'utf8' | 'base64'
+}
+export type AppRuntime = 'auto' | 'node' | 'python' | 'static' | 'custom' | 'docker'
 export type Source =
   | { type: 'git'; url: string; branch?: string; buildPath?: string }
   | { type: 'docker'; image: string }
   | { type: 'compose'; file: string }
+  | {
+      type: 'files'
+      files?: UploadedFileInput[]
+      archiveBase64?: string
+      archiveName?: string
+      sourceDir?: string
+    }
 export type BuildType = 'nixpacks' | 'dockerfile' | 'railpack' | 'heroku_buildpacks' | 'paketo_buildpacks' | 'static'
 export type CreateInput = {
   name: string
@@ -48,6 +61,10 @@ export type CreateInput = {
   source: Source
   buildType?: BuildType
   dockerfile?: string
+  startFile?: string | null
+  installCommand?: string | null
+  command?: string | null
+  runtime?: AppRuntime
   port?: number
   env?: string
   domain?: string | null
@@ -64,8 +81,25 @@ export type UpdateInput = {
   composeFile?: string
   env?: string
   command?: string | null
+  startFile?: string | null
+  installCommand?: string | null
+  runtime?: AppRuntime
+  port?: number
   memoryLimit?: string | null
   cpuLimit?: string | null
+  redeploy?: boolean
+}
+export type UploadFilesInput = {
+  files?: UploadedFileInput[]
+  archiveBase64?: string
+  archiveName?: string
+  sourceDir?: string
+  clearExisting?: boolean
+  startFile?: string | null
+  installCommand?: string | null
+  command?: string | null
+  runtime?: AppRuntime
+  port?: number
   redeploy?: boolean
 }
 export type DomainInput = {
@@ -133,7 +167,7 @@ export function hostingService({ config, agents, db }: { config: HostingConfig; 
   }
 
   const methodOf = (proc: string): 'GET' | 'POST' =>
-    /\.(all|one|by[A-Z]\w*|readLogs|readAppMonitoring|allByCompose|search|getEnabledProviders)$/.test(proc) ? 'GET' : 'POST'
+    /\.(all|one|by[A-Z]\w*|readLogs|readAppMonitoring|allByCompose|search|getEnabledProviders|listFiles)$/.test(proc) ? 'GET' : 'POST'
 
   async function list(): Promise<HostedApp[]> {
     const projects = (await call<any[]>('project.all')) ?? []
@@ -223,6 +257,10 @@ export function hostingService({ config, agents, db }: { config: HostingConfig; 
         image: (one.dockerImage as string | null) ?? null,
         composeFile: null,
         command: (one.command as string | null) ?? null,
+        startFile: null as string | null,
+        installCommand: null as string | null,
+        runtime: 'docker' as string,
+        port: (one.externalPort as number | null) ?? null,
         env: (one.env as string | null) ?? '',
         domains: one.externalPort
           ? [{ id: `port-${one.externalPort}`, host: `${kind}:${one.externalPort}`, https: false, port: one.externalPort as number, path: '/', serviceName: null, url: `${kind}://127.0.0.1:${one.externalPort}` }]
@@ -257,6 +295,10 @@ export function hostingService({ config, agents, db }: { config: HostingConfig; 
       image: one.dockerImage ?? null,
       composeFile: (one.composeFile as string | null) ?? null,
       command: (one.command as string | null) ?? null,
+      startFile: (one.startFile as string | null) ?? null,
+      installCommand: (one.installCommand as string | null) ?? null,
+      runtime: (one.runtime as string | null) ?? 'auto',
+      port: (one.port as number | null) ?? (one.domains?.[0]?.port as number | null) ?? 3000,
       env: (one.env as string | null) ?? '',
       domains: ((one.domains ?? []) as any[]).map((d) => ({
         id: d.domainId as string,
@@ -279,7 +321,7 @@ export function hostingService({ config, agents, db }: { config: HostingConfig; 
 
   async function logs(deploymentId: string): Promise<string> {
     const r = await call<any>('deployment.readLogs', { deploymentId, tail: 400 })
-    return typeof r === 'string' ? r : String(r?.logs ?? (r ? JSON.stringify(r) : ''))
+    return typeof r === 'string' ? r : String(r?.logs ?? r?.log ?? (r ? JSON.stringify(r) : ''))
   }
 
   async function create(user: User, input: CreateInput) {
@@ -306,7 +348,20 @@ export function hostingService({ config, agents, db }: { config: HostingConfig; 
       kind = 'application'
       id = a.applicationId
       appName = a.appName
-      if (input.source.type === 'git') {
+      if (input.source.type === 'files') {
+        await call('application.uploadFiles', {
+          applicationId: id,
+          files: input.source.files,
+          archiveBase64: input.source.archiveBase64,
+          archiveName: input.source.archiveName,
+          sourceDir: input.source.sourceDir,
+          startFile: input.startFile ?? undefined,
+          installCommand: input.installCommand ?? undefined,
+          command: input.command ?? undefined,
+          runtime: input.runtime ?? 'auto',
+          port: input.port ?? 3000,
+        }, 'POST')
+      } else if (input.source.type === 'git') {
         await call('application.saveGitProvider', {
           applicationId: id,
           customGitUrl: input.source.url,
@@ -326,6 +381,16 @@ export function hostingService({ config, agents, db }: { config: HostingConfig; 
           publishDirectory: null,
           isStaticSpa: null,
         })
+        if (input.startFile || input.installCommand || input.command || input.runtime || input.port) {
+          await call('application.update', {
+            applicationId: id,
+            startFile: input.startFile ?? undefined,
+            installCommand: input.installCommand ?? undefined,
+            command: input.command ?? undefined,
+            runtime: input.runtime ?? undefined,
+            port: input.port ?? undefined,
+          })
+        }
       } else {
         await call('application.saveDockerProvider', {
           applicationId: id,
@@ -346,13 +411,16 @@ export function hostingService({ config, agents, db }: { config: HostingConfig; 
       }
     }
 
+    const appPort = input.port ?? 3000
     let host = input.domain?.trim() || (domain ? `${name}.${domain}` : null)
-    if (!host) host = (await call<string>('domain.generateDomain', { appName }).catch(() => null)) || null
+    if (!host && input.source.type !== 'compose') {
+      host = (await call<string>('domain.generateDomain', { appName }).catch(() => null)) || `127.0.0.1:${appPort}`
+    }
     if (host && input.source.type !== 'compose') {
       await call('domain.create', {
         host,
         path: '/',
-        port: input.port ?? 3000,
+        port: appPort,
         https: Boolean(domain),
         applicationId: id,
         certificateType: domain ? 'letsencrypt' : 'none',
@@ -360,10 +428,10 @@ export function hostingService({ config, agents, db }: { config: HostingConfig; 
       })
     }
     if (input.deploy !== false) await action(kind, id, 'deploy', user)
-    return { kind, id, name, url: host ? `${domain ? 'https' : 'http'}://${host}` : null }
+    return { kind, id, name, url: host ? `${domain ? 'https' : 'http'}://${host}` : `http://127.0.0.1:${appPort}` }
   }
 
-  /** Edit an existing hosted application or compose stack (source, branch, buildType, image, composeFile, env, command, name) and optionally redeploy. */
+  /** Edit an existing hosted application or compose stack (source, branch, buildType, image, composeFile, env, command, startFile, installCommand, runtime, port, name) and optionally redeploy. */
   async function update(user: User, kind: Kind, id: string, patch: UpdateInput) {
     if (kind === 'compose') {
       const payload: Record<string, unknown> = { composeId: id }
@@ -382,10 +450,23 @@ export function hostingService({ config, agents, db }: { config: HostingConfig; 
       if (patch.command !== undefined) payload.command = patch.command
       await call('compose.update', payload)
     } else {
-      if (patch.name !== undefined || patch.command !== undefined || patch.memoryLimit !== undefined || patch.cpuLimit !== undefined) {
+      if (
+        patch.name !== undefined ||
+        patch.command !== undefined ||
+        patch.startFile !== undefined ||
+        patch.installCommand !== undefined ||
+        patch.runtime !== undefined ||
+        patch.port !== undefined ||
+        patch.memoryLimit !== undefined ||
+        patch.cpuLimit !== undefined
+      ) {
         const updatePayload: Record<string, unknown> = { applicationId: id }
         if (patch.name !== undefined) updatePayload.name = patch.name.trim()
         if (patch.command !== undefined) updatePayload.command = patch.command
+        if (patch.startFile !== undefined) updatePayload.startFile = patch.startFile
+        if (patch.installCommand !== undefined) updatePayload.installCommand = patch.installCommand
+        if (patch.runtime !== undefined) updatePayload.runtime = patch.runtime
+        if (patch.port !== undefined) updatePayload.port = patch.port
         if (patch.memoryLimit !== undefined) updatePayload.memoryLimit = patch.memoryLimit
         if (patch.cpuLimit !== undefined) updatePayload.cpuLimit = patch.cpuLimit
         await call('application.update', updatePayload)
@@ -544,6 +625,55 @@ export function hostingService({ config, agents, db }: { config: HostingConfig; 
     return call('application.readAppMonitoring', { appName }).catch(() => null)
   }
 
+  /** List files and start configuration in a hosted application's workspace. */
+  async function listFiles(id: string) {
+    return call<{
+      workDir: string
+      startFile: string | null
+      command: string | null
+      installCommand: string | null
+      runtime: string
+      port: number
+      files: { path: string; size: number; updatedAt: string }[]
+    }>('application.listFiles', { applicationId: id }, 'GET')
+  }
+
+  /** Upload or update files, archive, or server directory for a hosted application and optionally redeploy. */
+  async function uploadFiles(user: User, id: string, input: UploadFilesInput) {
+    const res = await call<{
+      ok: boolean
+      workDir: string
+      startFile: string | null
+      files: { path: string; size: number; updatedAt: string }[]
+    }>('application.uploadFiles', {
+      applicationId: id,
+      files: input.files,
+      archiveBase64: input.archiveBase64,
+      archiveName: input.archiveName,
+      sourceDir: input.sourceDir,
+      clearExisting: input.clearExisting,
+      startFile: input.startFile,
+      installCommand: input.installCommand,
+      command: input.command,
+      runtime: input.runtime,
+      port: input.port,
+    }, 'POST')
+    if (input.redeploy !== false) {
+      await action('application', id, 'redeploy', user)
+    }
+    return res
+  }
+
+  /** Read a single file from a hosted application's workspace. */
+  async function readFile(id: string, path: string) {
+    return call<{ path: string; content: string; size: number }>('application.readFile', { applicationId: id, path }, 'POST')
+  }
+
+  /** Delete a file from a hosted application's workspace. */
+  async function deleteFile(id: string, path: string) {
+    return call<{ ok: boolean; files: { path: string; size: number; updatedAt: string }[] }>('application.deleteFile', { applicationId: id, path }, 'POST')
+  }
+
   async function status() {
     try {
       await call('project.all')
@@ -589,17 +719,30 @@ export function hostingService({ config, agents, db }: { config: HostingConfig; 
     agents.onRpc('mcp.hosting_logs', (_u, p) => logs(need(args(p).deployment_id, 'deployment_id')))
     agents.onRpc('mcp.hosting_create', (u, p) => {
       const a = args(p)
-      const source: Source = str(a.compose_file)
+      const hasFiles = Array.isArray(a.files) || Boolean(str(a.source_dir)) || Boolean(str(a.archive_base64)) || a.source_type === 'files'
+      const source: Source = hasFiles
+        ? {
+            type: 'files',
+            files: Array.isArray(a.files) ? (a.files as UploadedFileInput[]) : undefined,
+            sourceDir: str(a.source_dir),
+            archiveBase64: str(a.archive_base64),
+            archiveName: str(a.archive_name),
+          }
+        : str(a.compose_file)
         ? { type: 'compose', file: str(a.compose_file)! }
         : str(a.docker_image)
         ? { type: 'docker', image: str(a.docker_image)! }
-        : { type: 'git', url: need(a.git_url, 'git_url, docker_image or compose_file'), branch: str(a.branch), buildPath: str(a.build_path) }
+        : { type: 'git', url: need(a.git_url, 'git_url, docker_image, compose_file, files, or source_dir'), branch: str(a.branch), buildPath: str(a.build_path) }
       return create(who(u), {
         name: need(a.name, 'name'),
         project: str(a.project),
         source,
         buildType: str(a.build_type) as BuildType | undefined,
         dockerfile: str(a.dockerfile),
+        startFile: str(a.start_file) ?? null,
+        installCommand: str(a.install_command) ?? null,
+        command: str(a.start_command) ?? str(a.command) ?? null,
+        runtime: (str(a.runtime) as AppRuntime | undefined) ?? undefined,
         port: typeof a.port === 'number' ? a.port : undefined,
         env: typeof a.env === 'string' ? a.env : undefined,
         domain: str(a.domain) ?? null,
@@ -618,11 +761,40 @@ export function hostingService({ config, agents, db }: { config: HostingConfig; 
         dockerImage: str(a.docker_image),
         composeFile: str(a.compose_file),
         env: typeof a.env === 'string' ? a.env : undefined,
-        command: typeof a.command === 'string' ? a.command : undefined,
+        command: typeof a.start_command === 'string' ? a.start_command : typeof a.command === 'string' ? a.command : undefined,
+        startFile: typeof a.start_file === 'string' ? a.start_file : undefined,
+        installCommand: typeof a.install_command === 'string' ? a.install_command : undefined,
+        runtime: str(a.runtime) as AppRuntime | undefined,
+        port: typeof a.port === 'number' ? a.port : undefined,
         memoryLimit: str(a.memory_limit),
         cpuLimit: str(a.cpu_limit),
         redeploy: a.redeploy === true,
       })
+    })
+    agents.onRpc('mcp.hosting_files_list', (_u, p) => listFiles(need(args(p).id, 'id')))
+    agents.onRpc('mcp.hosting_files_upload', (u, p) => {
+      const a = args(p)
+      return uploadFiles(who(u), need(a.id, 'id'), {
+        files: Array.isArray(a.files) ? (a.files as UploadedFileInput[]) : undefined,
+        sourceDir: str(a.source_dir),
+        archiveBase64: str(a.archive_base64),
+        archiveName: str(a.archive_name),
+        clearExisting: a.clear_existing === true,
+        startFile: typeof a.start_file === 'string' ? a.start_file : undefined,
+        installCommand: typeof a.install_command === 'string' ? a.install_command : undefined,
+        command: typeof a.start_command === 'string' ? a.start_command : typeof a.command === 'string' ? a.command : undefined,
+        runtime: str(a.runtime) as AppRuntime | undefined,
+        port: typeof a.port === 'number' ? a.port : undefined,
+        redeploy: a.redeploy !== false,
+      })
+    })
+    agents.onRpc('mcp.hosting_files_read', (_u, p) => {
+      const a = args(p)
+      return readFile(need(a.id, 'id'), need(a.path, 'path'))
+    })
+    agents.onRpc('mcp.hosting_files_delete', (_u, p) => {
+      const a = args(p)
+      return deleteFile(need(a.id, 'id'), need(a.path, 'path'))
     })
     agents.onRpc('mcp.hosting_domain_add', (_u, p) => {
       const a = args(p)
@@ -668,7 +840,25 @@ export function hostingService({ config, agents, db }: { config: HostingConfig; 
     })
   }
 
-  return { status, list, get, logs, create, createDatabase, update, addDomain, removeDomain, action, dokployCall, appMonitoring, registerMcp }
+  return {
+    status,
+    list,
+    get,
+    logs,
+    create,
+    createDatabase,
+    update,
+    addDomain,
+    removeDomain,
+    action,
+    dokployCall,
+    appMonitoring,
+    listFiles,
+    uploadFiles,
+    readFile,
+    deleteFile,
+    registerMcp,
+  }
 }
 
 function safeJson(t: string) {

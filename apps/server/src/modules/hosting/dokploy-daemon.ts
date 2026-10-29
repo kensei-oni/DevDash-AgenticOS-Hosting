@@ -1,10 +1,11 @@
 import { serve } from '@hono/node-server'
 import { Hono } from 'hono'
-import { execFile } from 'node:child_process'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createServer as createHttpServer, type Server as HttpServer } from 'node:http'
 import { createServer } from 'node:net'
-import { join } from 'node:path'
+import { dirname, extname, join, normalize, relative, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { openDb, type Db } from '../../core/db.ts'
 
@@ -60,6 +61,9 @@ function initDokploySchema(db: Db) {
       dockerfile text default 'Dockerfile',
       env text not null default '',
       command text,
+      start_file text,
+      install_command text,
+      runtime text not null default 'auto',
       memory_limit text,
       cpu_limit text,
       port integer default 3000,
@@ -152,6 +156,13 @@ function initDokploySchema(db: Db) {
       created_at text not null
     );
   `)
+  for (const col of [
+    `alter table dp_applications add column start_file text`,
+    `alter table dp_applications add column install_command text`,
+    `alter table dp_applications add column runtime text not null default 'auto'`,
+  ]) {
+    try { db.exec(col) } catch { /* column already exists */ }
+  }
 }
 
 const DEFAULT_TRAEFIK_YML = `# agOS Bundled Dokploy Traefik Configuration (Ports 8880 HTTP / 8843 HTTPS)
@@ -189,6 +200,205 @@ export async function startBundledDokployDaemon(opts: DokployDaemonOptions): Pro
 
   const db = openDb(join(rootDir, 'dokploy.db'))
   initDokploySchema(db)
+
+  const activeRunners = new Map<string, { proc?: ChildProcess; server?: HttpServer; port: number }>()
+
+  function stopAppRunner(applicationId: string) {
+    const existing = activeRunners.get(applicationId)
+    if (!existing) return
+    activeRunners.delete(applicationId)
+    if (existing.proc) {
+      try { existing.proc.kill('SIGTERM') } catch { /* ignore */ }
+    }
+    if (existing.server) {
+      try { existing.server.close() } catch { /* ignore */ }
+    }
+  }
+
+  function safeRelPath(appWork: string, rel: string): string {
+    const cleaned = normalize(rel.replace(/^[/\\]+/, '')).replace(/^(\.\.(\/|\\|$))+/, '')
+    const full = resolve(appWork, cleaned)
+    const root = resolve(appWork)
+    if (!full.startsWith(root)) throw new Error('Invalid file path')
+    return full
+  }
+
+  function listWorkspaceFiles(appWork: string, base = appWork): { path: string; size: number; updatedAt: string }[] {
+    if (!existsSync(base)) return []
+    const out: { path: string; size: number; updatedAt: string }[] = []
+    for (const entry of readdirSync(base, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '__pycache__' || entry.name === '.venv') continue
+      const full = join(base, entry.name)
+      if (entry.isDirectory()) {
+        out.push(...listWorkspaceFiles(appWork, full))
+      } else if (entry.isFile()) {
+        const st = statSync(full)
+        out.push({
+          path: relative(appWork, full).replace(/\\/g, '/'),
+          size: st.size,
+          updatedAt: st.mtime.toISOString(),
+        })
+      }
+    }
+    return out.sort((a, b) => a.path.localeCompare(b.path))
+  }
+
+  const CANDIDATE_ENTRY_FILES = [
+    'server.js', 'index.js', 'app.js', 'main.js',
+    'src/server.js', 'src/index.js', 'src/app.js', 'src/main.js',
+    'server.mjs', 'index.mjs', 'server.ts', 'index.ts', 'main.ts', 'app.ts',
+    'src/server.ts', 'src/index.ts', 'src/main.ts',
+    'app.py', 'main.py', 'server.py', 'run.py',
+    'index.html', 'public/index.html', 'dist/index.html',
+  ]
+
+  function detectEntryFile(files: { path: string }[]): string | null {
+    const set = new Set(files.map((f) => f.path))
+    for (const c of CANDIDATE_ENTRY_FILES) {
+      if (set.has(c)) return c
+    }
+    const firstCode = files.find((f) => /\.(js|mjs|ts|py|html)$/i.test(f.path))
+    return firstCode?.path ?? null
+  }
+
+  function parseEnvString(raw: string | null | undefined, port: number): Record<string, string> {
+    const out: Record<string, string> = { ...(process.env as Record<string, string>), PORT: String(port) }
+    for (const line of String(raw || '').split('\n')) {
+      const t = line.trim()
+      if (!t || t.startsWith('#')) continue
+      const eq = t.indexOf('=')
+      if (eq > 0) {
+        const k = t.slice(0, eq).trim()
+        const v = t.slice(eq + 1).trim().replace(/^['"]|['"]$/g, '')
+        out[k] = v
+      }
+    }
+    return out
+  }
+
+  const MIME_BY_EXT: Record<string, string> = {
+    '.html': 'text/html; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.js': 'application/javascript; charset=utf-8',
+    '.mjs': 'application/javascript; charset=utf-8',
+    '.json': 'application/json; charset=utf-8',
+    '.svg': 'image/svg+xml',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.ico': 'image/x-icon',
+    '.txt': 'text/plain; charset=utf-8',
+  }
+
+  async function startWorkspaceRuntime(applicationId: string, a: any, appWork: string, port: number, log: (msg: string) => void) {
+    stopAppRunner(applicationId)
+    mkdirSync(appWork, { recursive: true })
+    const files = listWorkspaceFiles(appWork)
+    const entry = a.start_file || detectEntryFile(files)
+    const runtime = String(a.runtime || 'auto')
+    const env = parseEnvString(a.env, port)
+
+    // 1. Run install command if configured or if package.json exists without node_modules
+    const pkgPath = join(appWork, 'package.json')
+    const installCmd = a.install_command?.trim() || (existsSync(pkgPath) && !existsSync(join(appWork, 'node_modules')) ? 'npm install' : '')
+    if (installCmd) {
+      log(`Running install/build command: ${installCmd}`)
+      const sh = process.platform === 'win32' ? 'cmd.exe' : 'sh'
+      const shArgs = process.platform === 'win32' ? ['/d', '/s', '/c', installCmd] : ['-c', installCmd]
+      try {
+        const { stdout, stderr } = await run(sh, shArgs, { cwd: appWork, env, timeout: 120_000 })
+        if (stdout.trim()) log(stdout.trim())
+        if (stderr.trim()) log(stderr.trim())
+      } catch (err) {
+        log(`Install command warning: ${(err as Error).message}`)
+      }
+    }
+
+    // 2. Determine whether to serve static files or spawn a process
+    const isStatic =
+      runtime === 'static' ||
+      (!a.command?.trim() && runtime === 'auto' && entry?.toLowerCase().endsWith('.html') && !existsSync(pkgPath))
+
+    if (isStatic) {
+      const indexFile = entry || 'index.html'
+      log(`Starting static HTTP server for ${appWork} (entry: ${indexFile}) on http://127.0.0.1:${port}`)
+      await new Promise<void>((resolve) => {
+        const srv = createHttpServer((req, res) => {
+          const reqPath = (req.url || '/').split('?')[0] || '/'
+          const rel = reqPath === '/' ? indexFile : reqPath.replace(/^\/+/, '')
+          let target = join(appWork, rel)
+          if (!existsSync(target) || (existsSync(target) && statSync(target).isDirectory())) {
+            target = join(appWork, indexFile)
+          }
+          if (!existsSync(target) || !statSync(target).isFile()) {
+            res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
+            res.end(`404 Not Found (${rel})`)
+            return
+          }
+          const ext = extname(target).toLowerCase()
+          res.writeHead(200, { 'content-type': MIME_BY_EXT[ext] || 'application/octet-stream' })
+          res.end(readFileSync(target))
+        })
+        srv.on('error', (err) => {
+          log(`Static server port ${port} note: ${err.message}`)
+          resolve()
+        })
+        srv.listen(port, '127.0.0.1', () => {
+          activeRunners.set(applicationId, { server: srv, port })
+          log(`Static server listening on http://127.0.0.1:${port}`)
+          resolve()
+        })
+      })
+      return
+    }
+
+    // 3. Determine start command or entry file command
+    let cmdToRun = a.command?.trim() || ''
+    if (!cmdToRun) {
+      if (runtime === 'python' || entry?.toLowerCase().endsWith('.py')) {
+        const pyBin = process.platform === 'win32' ? 'python' : 'python3'
+        cmdToRun = `${pyBin} "${entry || 'main.py'}"`
+      } else if (entry && /\.(js|mjs|cjs|ts)$/i.test(entry)) {
+        cmdToRun = `"${process.execPath}" "${entry}"`
+      } else if (existsSync(pkgPath)) {
+        try {
+          const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'))
+          if (pkg.scripts?.start) cmdToRun = 'npm run start'
+          else if (pkg.main) cmdToRun = `"${process.execPath}" "${pkg.main}"`
+        } catch { /* ignore */ }
+      }
+    }
+
+    if (!cmdToRun) {
+      log(`No start command or runnable entry file found in ${appWork} (files: ${files.map((f) => f.path).join(', ') || 'none'}). Set a Start File or Start Command to launch a process.`)
+      return
+    }
+
+    log(`Starting process in ${appWork} (PORT=${port}): $ ${cmdToRun}`)
+    const sh = process.platform === 'win32' ? 'cmd.exe' : 'sh'
+    const shArgs = process.platform === 'win32' ? ['/d', '/s', '/c', cmdToRun] : ['-c', cmdToRun]
+    const child = spawn(sh, shArgs, {
+      cwd: appWork,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    activeRunners.set(applicationId, { proc: child, port })
+    child.stdout?.on('data', (chunk: Buffer) => {
+      const text = chunk.toString('utf8').trim()
+      if (text) log(text)
+    })
+    child.stderr?.on('data', (chunk: Buffer) => {
+      const text = chunk.toString('utf8').trim()
+      if (text) log(`[stderr] ${text}`)
+    })
+    child.on('exit', (code) => {
+      log(`Process exited with code ${code ?? 0}`)
+    })
+    // Wait briefly so immediate startup output or errors are captured in the deployment log
+    await new Promise((r) => setTimeout(r, 400))
+    log(`Application process running (PID ${child.pid ?? 'spawned'}) on port ${port}.`)
+  }
 
   function writeTraefikRoute(appName: string, domains: any[], fallbackPort = 3000) {
     const file = join(dynamicDir, `${appName}.yml`)
@@ -277,8 +487,9 @@ export async function startBundledDokployDaemon(opts: DokployDaemonOptions): Pro
           return
         }
       }
-      if (a.custom_git_url) {
-        const appWork = join(workDir, a.app_name)
+      const appWork = join(workDir, a.app_name)
+      const targetPort = Number(domains[0]?.port || a.port || 3000)
+      if (a.custom_git_url && a.source_type === 'git') {
         log(`Preparing Git workspace for ${a.custom_git_url} (branch: ${a.custom_git_branch || 'main'}, build: ${a.build_type})...`)
         try {
           if (!existsSync(join(appWork, '.git'))) {
@@ -296,7 +507,10 @@ export async function startBundledDokployDaemon(opts: DokployDaemonOptions): Pro
           log(`Git checkout note: ${(err as Error).message}`)
         }
       }
-      log(`Application ${a.name} (${a.app_name}) is active in Dokploy.`)
+      if (a.source_type === 'files' || existsSync(appWork)) {
+        await startWorkspaceRuntime(applicationId, a, appWork, targetPort, log)
+      }
+      log(`Application ${a.name} (${a.app_name}) is active in Dokploy on port ${targetPort}.`)
     })
     return { ok: true }
   }
@@ -388,9 +602,12 @@ export async function startBundledDokployDaemon(opts: DokployDaemonOptions): Pro
       dockerfile: a.dockerfile,
       env: a.env,
       command: a.command,
+      startFile: a.start_file ?? null,
+      installCommand: a.install_command ?? null,
+      runtime: a.runtime ?? 'auto',
       memoryLimit: a.memory_limit,
       cpuLimit: a.cpu_limit,
-      port: a.port,
+      port: a.port ?? 3000,
       createdAt: a.created_at,
       domains,
     }
@@ -604,11 +821,135 @@ export async function startBundledDokployDaemon(opts: DokployDaemonOptions): Pro
             update dp_applications
             set name = coalesce(?, name),
                 command = coalesce(?, command),
+                start_file = coalesce(?, start_file),
+                install_command = coalesce(?, install_command),
+                runtime = coalesce(?, runtime),
+                port = coalesce(?, port),
+                source_type = coalesce(?, source_type),
                 memory_limit = coalesce(?, memory_limit),
                 cpu_limit = coalesce(?, cpu_limit)
             where application_id = ?
-          `).run(input.name ?? null, input.command ?? null, input.memoryLimit ?? null, input.cpuLimit ?? null, input.applicationId)
+          `).run(
+            input.name ?? null,
+            input.command !== undefined ? input.command : null,
+            input.startFile !== undefined ? input.startFile : null,
+            input.installCommand !== undefined ? input.installCommand : null,
+            input.runtime ?? null,
+            input.port ? Number(input.port) : null,
+            input.sourceType ?? null,
+            input.memoryLimit ?? null,
+            input.cpuLimit ?? null,
+            input.applicationId,
+          )
           return c.json({ ok: true })
+        }
+
+        case 'application.uploadFiles': {
+          const a = db.prepare(`select * from dp_applications where application_id = ?`).get(input.applicationId) as any
+          if (!a) return c.json({ message: 'Application not found' }, 404)
+          const appWork = join(workDir, a.app_name)
+          if (input.clearExisting && existsSync(appWork)) {
+            rmSync(appWork, { recursive: true, force: true })
+          }
+          mkdirSync(appWork, { recursive: true })
+
+          if (typeof input.sourceDir === 'string' && input.sourceDir.trim()) {
+            const src = resolve(input.sourceDir.trim())
+            if (!existsSync(src)) return c.json({ message: `Source directory does not exist: ${src}` }, 400)
+            cpSync(src, appWork, {
+              recursive: true,
+              filter: (s) => !s.includes('node_modules') && !s.includes('.git'),
+            })
+          }
+
+          if (typeof input.archiveBase64 === 'string' && input.archiveBase64.trim()) {
+            const archiveName = String(input.archiveName || 'upload.zip').replace(/[^a-zA-Z0-9._-]/g, '_')
+            const tmpArchive = join(rootDir, `tmp-${randomUUID()}-${archiveName}`)
+            writeFileSync(tmpArchive, Buffer.from(input.archiveBase64, 'base64'))
+            try {
+              await run('tar', ['-xf', tmpArchive, '-C', appWork], { timeout: 30_000 })
+            } catch {
+              if (process.platform === 'win32') {
+                await run('powershell', ['-NoProfile', '-Command', `Expand-Archive -Path "${tmpArchive}" -DestinationPath "${appWork}" -Force`], { timeout: 30_000 }).catch(() => {})
+              } else {
+                await run('unzip', ['-o', tmpArchive, '-d', appWork], { timeout: 30_000 }).catch(() => {})
+              }
+            } finally {
+              try { unlinkSync(tmpArchive) } catch { /* ignore */ }
+            }
+          }
+
+          if (Array.isArray(input.files)) {
+            for (const f of input.files) {
+              if (!f || typeof f.path !== 'string' || !f.path.trim()) continue
+              const target = safeRelPath(appWork, f.path)
+              mkdirSync(dirname(target), { recursive: true })
+              const buf = f.encoding === 'base64' ? Buffer.from(String(f.content ?? ''), 'base64') : Buffer.from(String(f.content ?? ''), 'utf8')
+              writeFileSync(target, buf)
+            }
+          }
+
+          const files = listWorkspaceFiles(appWork)
+          const detectedStart = input.startFile !== undefined ? input.startFile : (a.start_file || detectEntryFile(files))
+          db.prepare(`
+            update dp_applications
+            set source_type = coalesce(?, 'files'),
+                start_file = ?,
+                install_command = coalesce(?, install_command),
+                command = coalesce(?, command),
+                runtime = coalesce(?, runtime),
+                port = coalesce(?, port)
+            where application_id = ?
+          `).run(
+            input.sourceType ?? 'files',
+            detectedStart ?? null,
+            input.installCommand !== undefined ? input.installCommand : null,
+            input.command !== undefined ? input.command : null,
+            input.runtime ?? null,
+            input.port ? Number(input.port) : null,
+            input.applicationId,
+          )
+          return c.json({
+            ok: true,
+            workDir: appWork,
+            startFile: detectedStart ?? null,
+            files,
+          })
+        }
+
+        case 'application.listFiles': {
+          const a = db.prepare(`select * from dp_applications where application_id = ?`).get(input.applicationId) as any
+          if (!a) return c.json({ message: 'Application not found' }, 404)
+          const appWork = join(workDir, a.app_name)
+          const files = listWorkspaceFiles(appWork)
+          return c.json({
+            workDir: appWork,
+            startFile: a.start_file ?? detectEntryFile(files),
+            command: a.command ?? null,
+            installCommand: a.install_command ?? null,
+            runtime: a.runtime ?? 'auto',
+            port: a.port ?? 3000,
+            files,
+          })
+        }
+
+        case 'application.readFile': {
+          const a = db.prepare(`select * from dp_applications where application_id = ?`).get(input.applicationId) as any
+          if (!a) return c.json({ message: 'Application not found' }, 404)
+          const appWork = join(workDir, a.app_name)
+          const target = safeRelPath(appWork, String(input.path || ''))
+          if (!existsSync(target) || !statSync(target).isFile()) return c.json({ message: 'File not found' }, 404)
+          const content = readFileSync(target, 'utf8')
+          return c.json({ path: input.path, content, size: Buffer.byteLength(content) })
+        }
+
+        case 'application.deleteFile': {
+          const a = db.prepare(`select * from dp_applications where application_id = ?`).get(input.applicationId) as any
+          if (!a) return c.json({ message: 'Application not found' }, 404)
+          const appWork = join(workDir, a.app_name)
+          const target = safeRelPath(appWork, String(input.path || ''))
+          if (existsSync(target)) rmSync(target, { recursive: true, force: true })
+          return c.json({ ok: true, files: listWorkspaceFiles(appWork) })
         }
 
         case 'application.deploy':
@@ -618,8 +959,12 @@ export async function startBundledDokployDaemon(opts: DokployDaemonOptions): Pro
         case 'application.start': {
           const a = db.prepare(`select * from dp_applications where application_id = ?`).get(input.applicationId) as any
           if (a) {
-            await run('docker', ['start', a.app_name], { timeout: 15_000 }).catch(() => {})
-            db.prepare(`update dp_applications set application_status = 'done' where application_id = ?`).run(input.applicationId)
+            if (a.source_type === 'files' || existsSync(join(workDir, a.app_name))) {
+              await deployApplication(input.applicationId, 'Start application')
+            } else {
+              await run('docker', ['start', a.app_name], { timeout: 15_000 }).catch(() => {})
+              db.prepare(`update dp_applications set application_status = 'done' where application_id = ?`).run(input.applicationId)
+            }
           }
           return c.json({ ok: true })
         }
@@ -627,6 +972,7 @@ export async function startBundledDokployDaemon(opts: DokployDaemonOptions): Pro
         case 'application.stop': {
           const a = db.prepare(`select * from dp_applications where application_id = ?`).get(input.applicationId) as any
           if (a) {
+            stopAppRunner(input.applicationId)
             await run('docker', ['stop', a.app_name], { timeout: 15_000 }).catch(() => {})
             db.prepare(`update dp_applications set application_status = 'idle' where application_id = ?`).run(input.applicationId)
           }
@@ -635,7 +981,12 @@ export async function startBundledDokployDaemon(opts: DokployDaemonOptions): Pro
 
         case 'application.delete': {
           const a = db.prepare(`select * from dp_applications where application_id = ?`).get(input.applicationId) as any
-          if (a) await run('docker', ['rm', '-f', a.app_name], { timeout: 15_000 }).catch(() => {})
+          if (a) {
+            stopAppRunner(input.applicationId)
+            await run('docker', ['rm', '-f', a.app_name], { timeout: 15_000 }).catch(() => {})
+            const appWork = join(workDir, a.app_name)
+            if (existsSync(appWork)) rmSync(appWork, { recursive: true, force: true })
+          }
           db.prepare(`delete from dp_domains where application_id = ?`).run(input.applicationId)
           db.prepare(`delete from dp_applications where application_id = ?`).run(input.applicationId)
           return c.json({ ok: true })
@@ -780,7 +1131,7 @@ export async function startBundledDokployDaemon(opts: DokployDaemonOptions): Pro
           const d = db.prepare(`select * from dp_deployments where deployment_id = ?`).get(input.deploymentId) as any
           if (!d) return c.json({ message: 'Deployment not found' }, 404)
           const logText = existsSync(d.log_path) ? readFileSync(d.log_path, 'utf8') : 'No log output recorded.'
-          return c.json({ log: logText })
+          return c.json({ logs: logText, log: logText })
         }
 
         case 'docker.getContainers': {
@@ -950,6 +1301,7 @@ export async function startBundledDokployDaemon(opts: DokployDaemonOptions): Pro
 
   return {
     close: () => {
+      for (const id of activeRunners.keys()) stopAppRunner(id)
       server.close()
       db.close()
     },
