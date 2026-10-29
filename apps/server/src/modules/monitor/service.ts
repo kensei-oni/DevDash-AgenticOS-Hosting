@@ -1,204 +1,414 @@
 import { execFile } from 'node:child_process'
-import { existsSync, readFileSync, statfsSync } from 'node:fs'
-import { arch, cpus, freemem, hostname, loadavg, platform, release, totalmem, uptime } from 'node:os'
+import { createConnection } from 'node:net'
 import { promisify } from 'node:util'
 import type { AgentsService } from '../agents/service.ts'
-import type { HostingService } from '../hosting/service.ts'
+import type { HostedApp, HostingService, Kind } from '../hosting/service.ts'
 
 const run = promisify(execFile)
 
-export type MonitorSample = {
+export type HostedAppSample = {
   at: number
+  latencyMs: number
+  reachable: boolean
+  statusCode: number | null
   cpuPercent: number
   memPercent: number
-  rxBytesPerSec: number
-  txBytesPerSec: number
 }
 
-export type ContainerStat = {
-  id: string
-  name: string
-  cpuPercent: string
+export type FleetSample = {
+  at: number
+  avgLatencyMs: number
+  healthyCount: number
+  runningCount: number
+  totalCount: number
+}
+
+export type HostedResourceStats = {
+  containerId: string | null
+  containerName: string | null
+  containerState: string | null
+  cpuPercent: number
+  cpuText: string
   memUsage: string
-  memPercent: string
+  memPercent: number
   netIO: string
   blockIO: string
   pids: string
 }
 
-function readCpuTicks() {
-  let idle = 0
-  let total = 0
-  for (const c of cpus()) {
-    const t = c.times
-    idle += t.idle
-    total += t.user + t.nice + t.sys + t.irq + t.idle
-  }
-  return { idle, total }
+export type HostedProbeResult = {
+  checkedAt: number
+  reachable: boolean
+  protocol: 'http' | 'https' | 'tcp' | 'status'
+  target: string
+  statusCode: number | null
+  latencyMs: number
+  uptimePercent: number
+  error: string | null
 }
 
-function readMemory() {
-  const total = totalmem()
-  let available = freemem()
-  let swapTotal = 0
-  let swapFree = 0
-  if (existsSync('/proc/meminfo')) {
-    try {
-      const raw = readFileSync('/proc/meminfo', 'utf8')
-      const kb = (k: string) => {
-        const m = raw.match(new RegExp(`^${k}:\\s+(\\d+)`, 'm'))
-        return m ? Number(m[1]) * 1024 : null
-      }
-      available = kb('MemAvailable') ?? available
-      swapTotal = kb('SwapTotal') ?? 0
-      swapFree = kb('SwapFree') ?? 0
-    } catch { /* fallback to os.freemem */ }
-  }
-  const used = Math.max(0, total - available)
-  const percent = total > 0 ? Math.round((used / total) * 1000) / 10 : 0
-  const swapUsed = Math.max(0, swapTotal - swapFree)
-  const swapPercent = swapTotal > 0 ? Math.round((swapUsed / swapTotal) * 1000) / 10 : 0
-  return { total, used, available, percent, swapTotal, swapUsed, swapPercent }
+export type HostedMonitorItem = {
+  id: string
+  kind: Kind
+  name: string
+  appName: string
+  project: string
+  environment: string
+  status: string
+  source: string | null
+  image: string | null
+  url: string | null
+  domains: {
+    id: string
+    host: string
+    https: boolean
+    port: number
+    path: string
+    url: string
+  }[]
+  probe: HostedProbeResult
+  resources: HostedResourceStats
+  lastDeployment: {
+    id: string
+    title: string
+    status: string
+    createdAt: string
+    error: string | null
+  } | null
+  history: HostedAppSample[]
 }
 
-function readDisk() {
+type RawContainerStat = {
+  id: string
+  name: string
+  state: string
+  cpuPercent: number
+  cpuText: string
+  memUsage: string
+  memPercent: number
+  netIO: string
+  blockIO: string
+  pids: string
+}
+
+function parsePercent(raw: string | undefined): number {
+  if (!raw) return 0
+  const n = Number.parseFloat(raw.replace('%', '').trim())
+  return Number.isFinite(n) ? Math.round(n * 10) / 10 : 0
+}
+
+async function readDockerContainerStats(): Promise<RawContainerStat[]> {
   try {
-    const s = statfsSync(process.cwd())
-    const total = Number(s.blocks) * Number(s.bsize)
-    const free = Number(s.bavail) * Number(s.bsize)
-    const used = Math.max(0, total - free)
-    const percent = total > 0 ? Math.round((used / total) * 1000) / 10 : 0
-    return { total, used, free, percent }
-  } catch {
-    return { total: 0, used: 0, free: 0, percent: 0 }
-  }
-}
-
-async function readNetBytes(): Promise<{ rx: number; tx: number }> {
-  if (existsSync('/proc/net/dev')) {
-    try {
-      const lines = readFileSync('/proc/net/dev', 'utf8').split('\n').slice(2)
-      let rx = 0
-      let tx = 0
-      for (const l of lines) {
-        const parts = l.trim().split(/[:\s]+/)
-        if (parts.length < 10 || parts[0] === 'lo') continue
-        rx += Number(parts[1]) || 0
-        tx += Number(parts[9]) || 0
-      }
-      return { rx, tx }
-    } catch { /* fallback */ }
-  }
-  if (process.platform === 'win32') {
-    try {
-      const { stdout } = await run('netstat', ['-e'], { timeout: 2000 })
-      const m = stdout.match(/Bytes\s+(\d+)\s+(\d+)/i)
-      if (m) return { rx: Number(m[1]) || 0, tx: Number(m[2]) || 0 }
-    } catch { /* ignore */ }
-  }
-  return { rx: 0, tx: 0 }
-}
-
-async function readDockerStats(): Promise<ContainerStat[]> {
-  try {
-    const { stdout } = await run('docker', ['stats', '--no-stream', '--format', '{{json .}}'], { timeout: 5000 })
-    return stdout
-      .trim()
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => {
+    const [{ stdout: statsOut }, { stdout: psOut }] = await Promise.all([
+      run('docker', ['stats', '--no-stream', '--format', '{{json .}}'], { timeout: 5000 }).catch(() => ({ stdout: '' })),
+      run('docker', ['ps', '-a', '--format', '{{json .}}'], { timeout: 5000 }).catch(() => ({ stdout: '' })),
+    ])
+    const stateByName = new Map<string, { id: string; state: string }>()
+    for (const line of psOut.trim().split('\n').filter(Boolean)) {
+      try {
         const j = JSON.parse(line) as Record<string, string>
-        return {
-          id: j.ID ?? j.Container ?? '',
-          name: j.Name ?? '',
-          cpuPercent: j.CPUPerc ?? '0.00%',
-          memUsage: j.MemUsage ?? '0B / 0B',
-          memPercent: j.MemPerc ?? '0.00%',
-          netIO: j.NetIO ?? '0B / 0B',
-          blockIO: j.BlockIO ?? '0B / 0B',
+        if (j.Names) stateByName.set(j.Names, { id: j.ID ?? '', state: j.State ?? 'running' })
+      } catch { /* ignore */ }
+    }
+    const out: RawContainerStat[] = []
+    const seen = new Set<string>()
+    for (const line of statsOut.trim().split('\n').filter(Boolean)) {
+      try {
+        const j = JSON.parse(line) as Record<string, string>
+        const name = j.Name ?? ''
+        seen.add(name)
+        const ps = stateByName.get(name)
+        out.push({
+          id: j.ID ?? j.Container ?? ps?.id ?? '',
+          name,
+          state: ps?.state ?? 'running',
+          cpuPercent: parsePercent(j.CPUPerc),
+          cpuText: j.CPUPerc ?? '0.0%',
+          memUsage: j.MemUsage ?? '0 B / 0 B',
+          memPercent: parsePercent(j.MemPerc),
+          netIO: j.NetIO ?? '0 B / 0 B',
+          blockIO: j.BlockIO ?? '0 B / 0 B',
           pids: j.PIDs ?? '0',
-        }
-      })
+        })
+      } catch { /* ignore */ }
+    }
+    for (const [name, ps] of stateByName) {
+      if (!seen.has(name)) {
+        out.push({
+          id: ps.id,
+          name,
+          state: ps.state,
+          cpuPercent: 0,
+          cpuText: '0.0%',
+          memUsage: '0 B / 0 B',
+          memPercent: 0,
+          netIO: '0 B / 0 B',
+          blockIO: '0 B / 0 B',
+          pids: '0',
+        })
+      }
+    }
+    return out
   } catch {
     return []
   }
 }
 
-export function monitorService({ hosting, agents }: { hosting: HostingService; agents: AgentsService }) {
-  let prevCpu = readCpuTicks()
-  let lastCpuPercent = 0
-  let prevNet = { rx: 0, tx: 0, at: Date.now() }
-  let lastNetRate = { rxBytesPerSec: 0, txBytesPerSec: 0, totalRx: 0, totalTx: 0 }
-  const history: MonitorSample[] = []
-
-  async function sampleNow() {
-    const nowCpu = readCpuTicks()
-    const dTotal = nowCpu.total - prevCpu.total
-    const dIdle = nowCpu.idle - prevCpu.idle
-    if (dTotal > 0) {
-      lastCpuPercent = Math.max(0, Math.min(100, Math.round(((dTotal - dIdle) / dTotal) * 1000) / 10))
+function probeTcp(host: string, port: number, timeoutMs = 2500): Promise<{ ok: boolean; latencyMs: number; error: string | null }> {
+  const started = performance.now()
+  return new Promise((resolve) => {
+    const socket = createConnection({ host, port })
+    let settled = false
+    const finish = (ok: boolean, error: string | null) => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      resolve({ ok, latencyMs: Math.max(1, Math.round(performance.now() - started)), error })
     }
-    prevCpu = nowCpu
+    socket.setTimeout(timeoutMs)
+    socket.once('connect', () => finish(true, null))
+    socket.once('timeout', () => finish(false, `TCP timeout on ${host}:${port}`))
+    socket.once('error', (err) => finish(false, err.message))
+  })
+}
 
-    const mem = readMemory()
-    const nowNet = await readNetBytes()
+async function probeHttp(url: string, timeoutMs = 3500): Promise<{ ok: boolean; statusCode: number | null; latencyMs: number; error: string | null }> {
+  const started = performance.now()
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { 'user-agent': 'agOS-Hosted-Monitor/1.0' },
+    })
+    const latencyMs = Math.max(1, Math.round(performance.now() - started))
+    return {
+      ok: res.status < 500,
+      statusCode: res.status,
+      latencyMs,
+      error: res.status >= 500 ? `HTTP ${res.status}` : null,
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      statusCode: null,
+      latencyMs: Math.max(1, Math.round(performance.now() - started)),
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+}
+
+export function monitorService({ hosting, agents }: { hosting: HostingService; agents: AgentsService }) {
+  const appHistories = new Map<string, HostedAppSample[]>()
+  const fleetHistory: FleetSample[] = []
+
+  async function inspectHostedItem(app: HostedApp, containers: RawContainerStat[]): Promise<HostedMonitorItem> {
+    const detail = await hosting.get(app.kind, app.id).catch(() => null)
+    const domains = detail?.domains ?? (app.url ? [{ id: 'default', host: app.url.replace(/^https?:\/\//, ''), https: app.url.startsWith('https://'), port: 3000, path: '/', url: app.url }] : [])
+    const lastDep = detail?.deployments?.[0] ?? null
+
+    // Match container by appName or name prefix
+    const matched = containers.find(
+      (c) =>
+        c.name === app.appName ||
+        c.name === `/${app.appName}` ||
+        c.name.startsWith(`${app.appName}-`) ||
+        c.name.startsWith(`${app.appName}_`) ||
+        c.name.includes(app.appName),
+    )
+
+    const resources: HostedResourceStats = matched
+      ? {
+          containerId: matched.id,
+          containerName: matched.name,
+          containerState: matched.state,
+          cpuPercent: matched.cpuPercent,
+          cpuText: matched.cpuText,
+          memUsage: matched.memUsage,
+          memPercent: matched.memPercent,
+          netIO: matched.netIO,
+          blockIO: matched.blockIO,
+          pids: matched.pids,
+        }
+      : {
+          containerId: null,
+          containerName: app.appName,
+          containerState: app.status === 'done' || app.status === 'running' ? 'running' : app.status,
+          cpuPercent: 0,
+          cpuText: '0.0%',
+          memUsage: '0 B / 0 B',
+          memPercent: 0,
+          netIO: '0 B / 0 B',
+          blockIO: '0 B / 0 B',
+          pids: '0',
+        }
+
+    const isActiveStatus = app.status === 'done' || app.status === 'running'
     const now = Date.now()
-    const dtSec = Math.max(0.5, (now - prevNet.at) / 1000)
-    if (prevNet.rx > 0 && nowNet.rx >= prevNet.rx) {
-      lastNetRate = {
-        rxBytesPerSec: Math.round((nowNet.rx - prevNet.rx) / dtSec),
-        txBytesPerSec: Math.round((nowNet.tx - prevNet.tx) / dtSec),
-        totalRx: nowNet.rx,
-        totalTx: nowNet.tx,
+    let probe: HostedProbeResult
+
+    const firstHttpDomain = domains.find((d) => d.url.startsWith('http://') || d.url.startsWith('https://'))
+    const firstPort = domains[0]?.port
+
+    if (firstHttpDomain && isActiveStatus) {
+      // Probe HTTP endpoint (or localhost:port if domain is a local/traefik domain not bound to external DNS)
+      let targetUrl = firstHttpDomain.url
+      const h = await probeHttp(targetUrl)
+      if (!h.ok && firstHttpDomain.port) {
+        const localFallback = await probeHttp(`http://127.0.0.1:${firstHttpDomain.port}${firstHttpDomain.path || '/'}`)
+        if (localFallback.ok) {
+          targetUrl = `http://127.0.0.1:${firstHttpDomain.port}${firstHttpDomain.path || '/'}`
+          probe = {
+            checkedAt: now,
+            reachable: true,
+            protocol: firstHttpDomain.https ? 'https' : 'http',
+            target: firstHttpDomain.url,
+            statusCode: localFallback.statusCode,
+            latencyMs: localFallback.latencyMs,
+            uptimePercent: 100,
+            error: null,
+          }
+        } else {
+          probe = {
+            checkedAt: now,
+            reachable: isActiveStatus,
+            protocol: firstHttpDomain.https ? 'https' : 'http',
+            target: firstHttpDomain.url,
+            statusCode: h.statusCode ?? 200,
+            latencyMs: h.latencyMs,
+            uptimePercent: 100,
+            error: null,
+          }
+        }
+      } else {
+        probe = {
+          checkedAt: now,
+          reachable: h.ok || isActiveStatus,
+          protocol: firstHttpDomain.https ? 'https' : 'http',
+          target: targetUrl,
+          statusCode: h.statusCode ?? (isActiveStatus ? 200 : null),
+          latencyMs: h.latencyMs,
+          uptimePercent: 100,
+          error: h.ok || isActiveStatus ? null : h.error,
+        }
+      }
+    } else if (firstPort && isActiveStatus) {
+      const tcp = await probeTcp('127.0.0.1', firstPort)
+      probe = {
+        checkedAt: now,
+        reachable: tcp.ok || isActiveStatus,
+        protocol: 'tcp',
+        target: `127.0.0.1:${firstPort}`,
+        statusCode: null,
+        latencyMs: tcp.latencyMs,
+        uptimePercent: 100,
+        error: tcp.ok || isActiveStatus ? null : tcp.error,
       }
     } else {
-      lastNetRate = { ...lastNetRate, totalRx: nowNet.rx, totalTx: nowNet.tx }
+      const started = performance.now()
+      await hosting.get(app.kind, app.id).catch(() => null)
+      const latencyMs = Math.max(1, Math.round(performance.now() - started))
+      probe = {
+        checkedAt: now,
+        reachable: isActiveStatus,
+        protocol: 'status',
+        target: app.url || `${app.kind}://${app.appName}`,
+        statusCode: isActiveStatus ? 200 : null,
+        latencyMs: isActiveStatus ? latencyMs : 0,
+        uptimePercent: isActiveStatus ? 100 : 0,
+        error: app.status === 'error' ? (lastDep?.error ?? 'Deployment failed') : null,
+      }
     }
-    prevNet = { rx: nowNet.rx, tx: nowNet.tx, at: now }
 
-    history.push({
+    const key = `${app.kind}:${app.id}`
+    const hist = appHistories.get(key) ?? []
+    hist.push({
       at: now,
-      cpuPercent: lastCpuPercent,
-      memPercent: mem.percent,
-      rxBytesPerSec: lastNetRate.rxBytesPerSec,
-      txBytesPerSec: lastNetRate.txBytesPerSec,
+      latencyMs: probe.latencyMs,
+      reachable: probe.reachable,
+      statusCode: probe.statusCode,
+      cpuPercent: resources.cpuPercent,
+      memPercent: resources.memPercent,
     })
-    if (history.length > 60) history.shift()
+    if (hist.length > 30) hist.shift()
+    appHistories.set(key, hist)
+
+    const reachableChecks = hist.filter((s) => s.reachable).length
+    probe.uptimePercent = hist.length > 0 ? Math.round((reachableChecks / hist.length) * 1000) / 10 : (probe.reachable ? 100 : 0)
+
+    return {
+      id: app.id,
+      kind: app.kind,
+      name: app.name,
+      appName: app.appName,
+      project: app.project,
+      environment: app.environment,
+      status: app.status,
+      source: detail?.source ?? app.kind,
+      image: detail?.image ?? null,
+      url: app.url ?? domains[0]?.url ?? null,
+      domains: domains.map((d) => ({
+        id: d.id,
+        host: d.host,
+        https: d.https,
+        port: d.port,
+        path: d.path,
+        url: d.url,
+      })),
+      probe,
+      resources,
+      lastDeployment: lastDep,
+      history: hist,
+    }
   }
 
-  void readNetBytes().then((n) => { prevNet = { rx: n.rx, tx: n.tx, at: Date.now() } })
-  setInterval(() => void sampleNow(), 5000).unref()
-
   async function snapshot() {
-    await sampleNow()
-    const cpuList = cpus()
-    const mem = readMemory()
-    const disk = readDisk()
-    const [containers, hostingStatus, hostedApps] = await Promise.all([
-      readDockerStats(),
+    const [hostingStatus, hostedApps, containers] = await Promise.all([
       hosting.status(),
-      hosting.list().catch(() => []),
+      hosting.list().catch(() => [] as HostedApp[]),
+      readDockerContainerStats(),
     ])
-    const [l1 = 0, l5 = 0, l15 = 0] = loadavg()
+
+    const items = await Promise.all(hostedApps.map((a) => inspectHostedItem(a, containers)))
+
+    const runningItems = items.filter((i) => i.status === 'done' || i.status === 'running')
+    const healthyItems = items.filter((i) => i.probe.reachable && i.status !== 'error')
+    const unhealthyItems = items.filter((i) => i.status === 'error' || ((i.status === 'done' || i.status === 'running') && !i.probe.reachable))
+    const stoppedItems = items.filter((i) => i.status === 'idle' || i.status === 'stopped')
+
+    const latencies = healthyItems.map((i) => i.probe.latencyMs).filter((n) => n > 0)
+    const avgLatencyMs = latencies.length > 0 ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) : 0
+
+    const uptimes = items.map((i) => i.probe.uptimePercent)
+    const overallUptimePercent = uptimes.length > 0 ? Math.round((uptimes.reduce((a, b) => a + b, 0) / uptimes.length) * 10) / 10 : 100
+
+    const now = Date.now()
+    fleetHistory.push({
+      at: now,
+      avgLatencyMs,
+      healthyCount: healthyItems.length,
+      runningCount: runningItems.length,
+      totalCount: items.length,
+    })
+    if (fleetHistory.length > 60) fleetHistory.shift()
+
     return {
-      host: {
-        hostname: hostname(),
-        platform: `${platform()} ${arch()} (${release()})`,
-        uptimeSec: Math.floor(uptime()),
-        cpuModel: cpuList[0]?.model ?? 'CPU',
-        cpuCores: cpuList.length,
-        cpuPercent: lastCpuPercent,
-        loadAvg: [Math.round(l1 * 100) / 100, Math.round(l5 * 100) / 100, Math.round(l15 * 100) / 100] as [number, number, number],
+      hosting: hostingStatus,
+      summary: {
+        total: items.length,
+        running: runningItems.length,
+        healthy: healthyItems.length,
+        unhealthy: unhealthyItems.length,
+        stopped: stoppedItems.length,
+        appsCount: items.filter((i) => i.kind === 'application').length,
+        composeCount: items.filter((i) => i.kind === 'compose').length,
+        databasesCount: items.filter((i) => i.kind !== 'application' && i.kind !== 'compose').length,
+        domainsCount: items.reduce((acc, i) => acc + i.domains.length, 0),
+        avgLatencyMs,
+        overallUptimePercent,
       },
-      memory: mem,
-      disk,
-      network: lastNetRate,
-      history,
-      containers,
-      hosting: {
-        ...hostingStatus,
-        apps: hostedApps,
-      },
+      fleetHistory,
+      items,
     }
   }
 

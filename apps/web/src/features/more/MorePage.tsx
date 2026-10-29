@@ -24,7 +24,7 @@ const LINKS = [
   { to: '/files', label: 'Files', description: 'Browse, upload and share files on the server', icon: HardDrive },
   { to: '/services', label: 'Services', description: 'Websites, APIs and containers that stay up', icon: Server },
   { to: '/hosting', label: 'Hosting', description: 'Deploy apps to the internet (Dokploy), by hand or with Claude', icon: Rocket },
-  { to: '/monitor', label: 'Monitor', description: 'Real-time CPU, RAM, disk, network and hosted container metrics', icon: Monitor },
+  { to: '/monitor', label: 'Hosted Monitor', description: 'Live health, latency, uptime and container stats for your hosted apps and databases', icon: Monitor },
   { to: '/server', label: 'Server', description: 'Health, versions and backups', icon: Activity },
   { to: '/members', label: 'Members', description: 'Invite people and see who has access', icon: Users },
   { to: '/claude/setup', label: 'Claude setup', description: 'Profiles, sign-in and defaults', icon: Sparkles },

@@ -84,9 +84,9 @@ In addition to **Claude Code**, agOS supports multiple terminal and agent CLIs o
 - **Antigravity CLI** (`agy` / `antigravity`) — Google Antigravity agentic CLI with `GEMINI_API_KEY`.
 - **Grok CLI** (`grok`) — xAI Grok terminal agent (`@vibe-kit/grok-cli`), auto-configured via `~/.grok/mcp-config.json` and `XAI_API_KEY`.
 
-### Server Monitor & Real-Time AI Browser
+### Hosted App Monitor & Real-Time AI Browser
 
-- **Server & Container Monitor (`/monitor`):** Real-time OS telemetry (live CPU %, RAM, Swap, Disk mounts, Network RX/TX rates with 60-sample rolling sparklines, `docker stats` per container, and bundled Dokploy health), also exposed to AI agents via the `hosting_monitor` MCP tool.
+- **Hosted Monitor (`/monitor`):** Real-time monitoring for your **hosted applications, compose stacks, databases, and domains** (live HTTP/TCP endpoint probes, response latency sparklines, uptime %, per-app container CPU/RAM/network telemetry, live deployment logs, and 1-click Start/Stop/Redeploy & Claude Code diagnosis), also exposed to AI agents via the `hosting_monitor` MCP tool.
 - **Real-Time AI Browser (`/browser`):** The shared Chromium browser exposes Chrome DevTools Protocol (`127.0.0.1:9222`) to AI sessions through `browser_status`, `browser_navigate`, `browser_click`, `browser_type`, `browser_press`, `browser_snapshot`, `browser_screenshot`, and `browser_eval`, broadcasting a live activity indicator on `/browser` while an agent drives the page.
 
 ### Workspace

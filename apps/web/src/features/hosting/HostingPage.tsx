@@ -72,22 +72,13 @@ export function HostingPage() {
           <Button size="sm" disabled={!ready} onClick={() => setAdding(true)}><Plus />Deploy</Button>
         </div>} />
       {view === 'studio' && status.data ? (
-        <div className="flex min-h-0 flex-1 flex-col px-4 pb-4">
-          <div className="mb-2 flex items-center justify-between rounded-lg border bg-card px-3 py-1.5 text-xs">
-            <span className="flex items-center gap-2">
-              <StatusLight state={ready ? 'live' : 'error'} />
-              <span>Full Dokploy Studio (agOS monochrome theme · port 3010 · Traefik :8880/:8843)</span>
-            </span>
-            <a href={status.data.dashboardUrl || status.data.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 font-mono underline underline-offset-4">
-              {status.data.dashboardUrl || status.data.url}<ExternalLink className="size-3" />
-            </a>
-          </div>
-          <iframe
-            title="Dokploy Studio"
-            src={status.data.dashboardUrl || status.data.url}
-            className="min-h-[75vh] w-full flex-1 rounded-xl border bg-background"
-          />
-        </div>
+        <DokployStudioView
+          status={status.data}
+          ready={!!ready}
+          onDeploy={() => setAdding(true)}
+          onAddDb={() => setAddingDb(true)}
+          onAskClaude={() => setAsking(true)}
+        />
       ) : (
       <PageBody>
         <ErrorAlert error={status.error ?? apps.error} />
@@ -165,10 +156,378 @@ function SetupHelp({ s }: { s: { url: string; error: string | null } }) {
       <AlertDescription className="space-y-2">
         <p>{s.error}</p>
         <p className="text-xs text-muted-foreground">
-          Dokploy runs beside agOS in <code className="font-mono">apps/hosting</code> on port <code className="font-mono">3010</code> (with Traefik on <code className="font-mono">8880</code>/<code className="font-mono">8843</code>) and authenticates automatically with agOS's <code className="font-mono">DEVDASH_MASTER_KEY</code>. Start the bundled service with <code className="font-mono">sudo bash deploy/hosting-install.sh</code> (or run <code className="font-mono">apps/hosting</code> locally on port 3010).
+          Dokploy runs beside agOS in <code className="font-mono">apps/hosting</code> on port <code className="font-mono">3010</code> (with Traefik on <code className="font-mono">8880</code>/<code className="font-mono">8843</code>) and authenticates automatically with agOS's <code className="font-mono">DEVDASH_MASTER_KEY</code>. Restart <code className="font-mono">npm run dev:server</code> or run <code className="font-mono">sudo bash deploy/hosting-install.sh</code>.
         </p>
       </AlertDescription>
     </Alert>
+  )
+}
+
+type StudioTab = 'projects' | 'traefik' | 'docker' | 'registries' | 'servers' | 'api' | 'webui'
+
+function DokployStudioView({
+  status,
+  ready,
+  onDeploy,
+  onAddDb,
+  onAskClaude,
+}: {
+  status: { url: string; dashboardUrl: string | null; domain: string | null; error: string | null }
+  ready: boolean
+  onDeploy: () => void
+  onAddDb: () => void
+  onAskClaude: () => void
+}) {
+  const qc = useQueryClient()
+  const [tab, setTab] = useState<StudioTab>('projects')
+  const [newProjName, setNewProjName] = useState('')
+  const [traefikDraft, setTraefikDraft] = useState<string | null>(null)
+  const [regName, setRegName] = useState('')
+  const [regUrl, setRegUrl] = useState('ghcr.io')
+  const [regUser, setRegUser] = useState('')
+  const [s3Name, setS3Name] = useState('')
+  const [s3Bucket, setS3Bucket] = useState('')
+  const [s3Endpoint, setS3Endpoint] = useState('https://s3.amazonaws.com')
+  const [srvName, setSrvName] = useState('')
+  const [srvIp, setSrvIp] = useState('')
+  const [apiProc, setApiProc] = useState('settings.getDokployVersion')
+  const [apiInput, setApiInput] = useState('{}')
+  const [apiResult, setApiResult] = useState<string | null>(null)
+
+  const callDokploy = (procedure: string, input?: Record<string, unknown>, method?: 'GET' | 'POST') =>
+    unwrap(api.api.hosting.dokploy.$post({ json: { procedure, input, method } })).then((r) => r.result)
+
+  const projectsQ = useQuery({
+    queryKey: ['hosting', 'studio', 'projects'],
+    enabled: ready && tab === 'projects',
+    queryFn: () => callDokploy('project.all', undefined, 'GET') as Promise<any[]>,
+  })
+  const traefikQ = useQuery({
+    queryKey: ['hosting', 'studio', 'traefik'],
+    enabled: ready && tab === 'traefik',
+    queryFn: () => callDokploy('settings.readTraefikConfig', undefined, 'GET') as Promise<{ config?: string }>,
+  })
+  const dockerQ = useQuery({
+    queryKey: ['hosting', 'studio', 'docker'],
+    enabled: ready && tab === 'docker',
+    queryFn: () => callDokploy('docker.getContainers', undefined, 'GET') as Promise<any[]>,
+  })
+  const registriesQ = useQuery({
+    queryKey: ['hosting', 'studio', 'registries'],
+    enabled: ready && tab === 'registries',
+    queryFn: async () => {
+      const [regs, dests] = await Promise.all([
+        callDokploy('registry.all', undefined, 'GET') as Promise<any[]>,
+        callDokploy('destination.all', undefined, 'GET') as Promise<any[]>,
+      ])
+      return { regs: regs ?? [], dests: dests ?? [] }
+    },
+  })
+  const serversQ = useQuery({
+    queryKey: ['hosting', 'studio', 'servers'],
+    enabled: ready && tab === 'servers',
+    queryFn: () => callDokploy('server.all', undefined, 'GET') as Promise<any[]>,
+  })
+
+  const createProject = useMutation({
+    mutationFn: () => callDokploy('project.create', { name: newProjName.trim() }, 'POST'),
+    onSuccess: () => {
+      setNewProjName('')
+      void qc.invalidateQueries({ queryKey: ['hosting'] })
+    },
+  })
+  const removeProject = useMutation({
+    mutationFn: (projectId: string) => callDokploy('project.remove', { projectId }, 'POST'),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['hosting'] }),
+  })
+  const saveTraefik = useMutation({
+    mutationFn: () => callDokploy('settings.updateTraefikConfig', { traefikConfig: traefikDraft ?? traefikQ.data?.config ?? '' }, 'POST'),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['hosting', 'studio', 'traefik'] }),
+  })
+  const pruneImages = useMutation({
+    mutationFn: () => callDokploy('settings.cleanUnusedImages', {}, 'POST'),
+    onSuccess: () => void dockerQ.refetch(),
+  })
+  const addRegistry = useMutation({
+    mutationFn: () => callDokploy('registry.create', { registryName: regName, registryUrl: regUrl, username: regUser }, 'POST'),
+    onSuccess: () => {
+      setRegName(''); setRegUser('')
+      void registriesQ.refetch()
+    },
+  })
+  const addDestination = useMutation({
+    mutationFn: () => callDokploy('destination.create', { name: s3Name, bucket: s3Bucket, endpoint: s3Endpoint }, 'POST'),
+    onSuccess: () => {
+      setS3Name(''); setS3Bucket('')
+      void registriesQ.refetch()
+    },
+  })
+  const addServer = useMutation({
+    mutationFn: () => callDokploy('server.create', { name: srvName, ipAddress: srvIp }, 'POST'),
+    onSuccess: () => {
+      setSrvName(''); setSrvIp('')
+      void serversQ.refetch()
+    },
+  })
+  const runApi = useMutation({
+    mutationFn: async () => {
+      const parsed = apiInput.trim() ? JSON.parse(apiInput) : undefined
+      const res = await callDokploy(apiProc.trim(), parsed)
+      setApiResult(JSON.stringify(res, null, 2))
+    },
+  })
+
+  return (
+    <PageBody>
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border bg-card px-3.5 py-2.5 text-xs">
+        <div className="flex items-center gap-2">
+          <StatusLight state={ready ? 'live' : 'error'} />
+          <span className="font-medium">Full Dokploy Studio (agOS monochrome theme · port 3010 · Traefik :8880/:8843)</span>
+        </div>
+        <div className="flex items-center gap-3">
+          <a
+            href={status.dashboardUrl || status.url}
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center gap-1 font-mono text-muted-foreground underline underline-offset-4 hover:text-foreground"
+          >
+            {status.dashboardUrl || status.url}<ExternalLink className="size-3" />
+          </a>
+        </div>
+      </div>
+
+      {!ready ? (
+        <SetupHelp s={status} />
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <ToggleGroup type="single" variant="outline" size="sm" value={tab} onValueChange={(v) => v && setTab(v as StudioTab)}>
+              <ToggleGroupItem value="projects">Projects &amp; Services</ToggleGroupItem>
+              <ToggleGroupItem value="traefik">Traefik (:8880/:8843)</ToggleGroupItem>
+              <ToggleGroupItem value="docker">Docker Containers</ToggleGroupItem>
+              <ToggleGroupItem value="registries">Registries &amp; S3 Backups</ToggleGroupItem>
+              <ToggleGroupItem value="servers">Cluster Nodes</ToggleGroupItem>
+              <ToggleGroupItem value="api">API Console</ToggleGroupItem>
+              <ToggleGroupItem value="webui">Port :3010 Web UI</ToggleGroupItem>
+            </ToggleGroup>
+          </div>
+
+          {tab === 'projects' && (
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border bg-card p-3.5">
+                <div className="flex items-center gap-2">
+                  <Input
+                    className="h-9 w-52 font-mono text-xs"
+                    placeholder="new-project-name"
+                    value={newProjName}
+                    onChange={(e) => setNewProjName(e.target.value)}
+                  />
+                  <Button size="sm" disabled={!newProjName.trim() || createProject.isPending} onClick={() => createProject.mutate()}>
+                    <Plus />Create Project
+                  </Button>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <Button size="sm" variant="outline" onClick={onDeploy}><Plus />Deploy App / Compose</Button>
+                  <Button size="sm" variant="outline" onClick={onAddDb}><Database />+ Managed DB</Button>
+                  <Button size="sm" variant="outline" onClick={onAskClaude}><Sparkles />Ask Claude</Button>
+                </div>
+              </div>
+
+              {projectsQ.isPending && <Skeleton className="h-32" />}
+              {(projectsQ.data ?? []).map((p: any) => {
+                const envs = p.environments ?? []
+                const services = envs.flatMap((e: any) => [
+                  ...(e.applications ?? []).map((a: any) => ({ kind: 'application' as Kind, id: a.applicationId, name: a.name, appName: a.appName, status: a.applicationStatus ?? 'idle', env: e.name })),
+                  ...(e.compose ?? []).map((c: any) => ({ kind: 'compose' as Kind, id: c.composeId, name: c.name, appName: c.appName, status: c.composeStatus ?? 'idle', env: e.name })),
+                  ...(['postgres', 'mysql', 'mariadb', 'mongo', 'redis'] as const).flatMap((k) =>
+                    (e[k] ?? []).map((d: any) => ({ kind: k as Kind, id: d[`${k}Id`] ?? d.dbId, name: d.name, appName: d.appName, status: d.applicationStatus ?? 'idle', env: e.name })),
+                  ),
+                ])
+                return (
+                  <div key={p.projectId} className="rounded-xl border bg-card p-4">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <h3 className="font-medium">{p.name}</h3>
+                        <p className="text-xs text-muted-foreground">{envs.length} environment(s) · {services.length} service(s)</p>
+                      </div>
+                      {p.name !== 'default' && (
+                        <Button size="xs" variant="ghost" onClick={() => removeProject.mutate(p.projectId)}>
+                          <Trash2 className="size-3.5" />
+                        </Button>
+                      )}
+                    </div>
+                    {services.length > 0 && (
+                      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                        {services.map((s: any) => (
+                          <Link
+                            key={`${s.kind}:${s.id}`}
+                            to="/hosting/$kind/$id"
+                            params={{ kind: s.kind, id: s.id }}
+                            className="flex items-center justify-between rounded-lg border bg-background px-3 py-2 text-xs hover:bg-muted/40"
+                          >
+                            <span className="flex items-center gap-2">
+                              <StatusLight state={lightOf(s.status)} />
+                              <strong className="font-medium">{s.name}</strong>
+                              <span className="font-mono text-[11px] text-muted-foreground">({s.kind})</span>
+                            </span>
+                            <Badge variant="secondary" className="font-mono text-[10px] capitalize">{s.status}</Badge>
+                          </Link>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          {tab === 'traefik' && (
+            <div className="flex flex-col gap-3 rounded-xl border bg-card p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="font-medium">Traefik Reverse Proxy Configuration (:8880 HTTP / :8843 HTTPS)</h3>
+                  <p className="text-xs text-muted-foreground">Live static configuration read from the bundled Dokploy engine</p>
+                </div>
+                <Button size="sm" onClick={() => saveTraefik.mutate()} disabled={saveTraefik.isPending}>
+                  {saveTraefik.isPending ? 'Saving…' : 'Save Traefik Config'}
+                </Button>
+              </div>
+              <Textarea
+                rows={16}
+                className="font-mono text-xs"
+                value={traefikDraft ?? traefikQ.data?.config ?? ''}
+                onChange={(e) => setTraefikDraft(e.target.value)}
+              />
+            </div>
+          )}
+
+          {tab === 'docker' && (
+            <div className="flex flex-col gap-3 rounded-xl border bg-card p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="font-medium">Docker Engine Containers</h3>
+                  <p className="text-xs text-muted-foreground">Live containers managed via Dokploy docker.getContainers</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button size="sm" variant="outline" onClick={() => pruneImages.mutate()} disabled={pruneImages.isPending}>
+                    Prune Unused Images
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => void dockerQ.refetch()}>
+                    <RefreshCw className={dockerQ.isFetching ? 'animate-spin' : ''} />
+                  </Button>
+                </div>
+              </div>
+              {!(dockerQ.data ?? []).length ? (
+                <p className="rounded-lg border px-3 py-4 text-xs text-muted-foreground">No Docker containers reported by docker ps.</p>
+              ) : (
+                <div className="divide-y rounded-lg border">
+                  {(dockerQ.data ?? []).map((c: any) => (
+                    <div key={c.containerId || c.name} className="flex items-center justify-between px-3 py-2 text-xs">
+                      <div>
+                        <span className="font-mono font-medium">{c.name}</span>
+                        <span className="ml-2 text-muted-foreground">{c.image} · {c.status}</span>
+                      </div>
+                      <Badge variant="secondary" className="font-mono text-[10px]">{c.state}</Badge>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === 'registries' && (
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="flex flex-col gap-3 rounded-xl border bg-card p-4">
+                <h3 className="font-medium">Container Registries (GHCR / Docker Hub / ECR)</h3>
+                <div className="grid gap-2">
+                  <Input placeholder="Registry Name (e.g. GHCR)" value={regName} onChange={(e) => setRegName(e.target.value)} />
+                  <Input placeholder="Registry URL (e.g. ghcr.io)" value={regUrl} onChange={(e) => setRegUrl(e.target.value)} />
+                  <Input placeholder="Username" value={regUser} onChange={(e) => setRegUser(e.target.value)} />
+                  <Button size="sm" disabled={!regName.trim() || addRegistry.isPending} onClick={() => addRegistry.mutate()}>
+                    <Plus />Add Registry
+                  </Button>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  {(registriesQ.data?.regs ?? []).map((r: any) => (
+                    <div key={r.registry_id || r.registryId} className="flex items-center justify-between rounded border px-2.5 py-1.5 text-xs font-mono">
+                      <span>{r.registry_name || r.registryName} ({r.registry_url || r.registryUrl})</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-3 rounded-xl border bg-card p-4">
+                <h3 className="font-medium">S3 Backup Destinations</h3>
+                <div className="grid gap-2">
+                  <Input placeholder="Destination Name (e.g. Nightly S3)" value={s3Name} onChange={(e) => setS3Name(e.target.value)} />
+                  <Input placeholder="Bucket Name" value={s3Bucket} onChange={(e) => setS3Bucket(e.target.value)} />
+                  <Input placeholder="Endpoint URL" value={s3Endpoint} onChange={(e) => setS3Endpoint(e.target.value)} />
+                  <Button size="sm" disabled={!s3Name.trim() || !s3Bucket.trim() || addDestination.isPending} onClick={() => addDestination.mutate()}>
+                    <Plus />Add S3 Destination
+                  </Button>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  {(registriesQ.data?.dests ?? []).map((d: any) => (
+                    <div key={d.destination_id || d.destinationId} className="flex items-center justify-between rounded border px-2.5 py-1.5 text-xs font-mono">
+                      <span>{d.name} ({d.bucket})</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {tab === 'servers' && (
+            <div className="flex flex-col gap-3 rounded-xl border bg-card p-4">
+              <h3 className="font-medium">Remote Deployment Servers &amp; Swarm Nodes</h3>
+              <div className="flex flex-wrap items-center gap-2">
+                <Input className="h-9 w-48 text-xs" placeholder="Node Name (e.g. worker-1)" value={srvName} onChange={(e) => setSrvName(e.target.value)} />
+                <Input className="h-9 w-48 font-mono text-xs" placeholder="IP Address" value={srvIp} onChange={(e) => setSrvIp(e.target.value)} />
+                <Button size="sm" disabled={!srvName.trim() || !srvIp.trim() || addServer.isPending} onClick={() => addServer.mutate()}>
+                  <Plus />Add Server Node
+                </Button>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <div className="flex items-center justify-between rounded-lg border bg-background px-3 py-2 text-xs">
+                  <span className="flex items-center gap-2 font-medium"><StatusLight state="live" />Local Bundled Dokploy Engine (127.0.0.1:3010)</span>
+                  <Badge variant="secondary" className="font-mono text-[10px]">primary</Badge>
+                </div>
+                {(serversQ.data ?? []).map((s: any) => (
+                  <div key={s.server_id || s.serverId} className="flex items-center justify-between rounded-lg border bg-background px-3 py-2 text-xs">
+                    <span><strong>{s.name}</strong> ({s.ip_address || s.ipAddress})</span>
+                    <Badge variant="outline" className="font-mono text-[10px]">{s.server_status || 'active'}</Badge>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {tab === 'api' && (
+            <div className="flex flex-col gap-3 rounded-xl border bg-card p-4">
+              <h3 className="font-medium">Direct Dokploy tRPC / API Console</h3>
+              <p className="text-xs text-muted-foreground">Invoke any Dokploy router procedure (&lt;router&gt;.&lt;procedure&gt;) directly against port 3010</p>
+              <div className="flex items-center gap-2">
+                <Input className="font-mono text-xs" value={apiProc} onChange={(e) => setApiProc(e.target.value)} placeholder="settings.getDokployVersion" />
+                <Button size="sm" onClick={() => runApi.mutate()} disabled={runApi.isPending}>Execute</Button>
+              </div>
+              <Textarea rows={4} className="font-mono text-xs" value={apiInput} onChange={(e) => setApiInput(e.target.value)} />
+              <ErrorAlert error={runApi.error} />
+              {apiResult && (
+                <pre className="max-h-80 overflow-auto rounded-lg border bg-background p-3 font-mono text-xs">{apiResult}</pre>
+              )}
+            </div>
+          )}
+
+          {tab === 'webui' && (
+            <iframe
+              title="Dokploy Studio (:3010)"
+              src={status.dashboardUrl || status.url}
+              className="min-h-[72vh] w-full rounded-xl border bg-background"
+            />
+          )}
+        </>
+      )}
+    </PageBody>
   )
 }
 

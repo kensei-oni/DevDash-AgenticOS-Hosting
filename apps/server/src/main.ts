@@ -4,6 +4,7 @@ import { createApp } from './app.ts'
 import { loadConfig } from './core/config.ts'
 import { openDb } from './core/db.ts'
 import { wsRouter } from './core/ws.ts'
+import { startBundledDokployDaemon } from './modules/hosting/dokploy-daemon.ts'
 import { registerSockets } from './sockets.ts'
 
 const config = loadConfig()
@@ -16,6 +17,14 @@ if (!config.runDir) {
   process.env.USER ??= process.env.USERNAME ?? 'local'
   await import('../../agent/src/main.ts')
 }
+const hostingUrl = new URL(config.hosting?.url || 'http://127.0.0.1:3010')
+const dokployDaemon = (hostingUrl.hostname === '127.0.0.1' || hostingUrl.hostname === 'localhost')
+  ? await startBundledDokployDaemon({
+      port: Number(hostingUrl.port) || 3010,
+      dataDir: config.dataDir,
+      masterKey: config.masterKey.toString('base64'),
+    })
+  : null
 const db = openDb(join(config.dataDir, 'devdash.db'))
 const { app, auth, provisioning, terms, agents, claude, services, hub, previews } = createApp({ db, config })
 
@@ -30,6 +39,7 @@ void provisioning.reconcileAll().then(() => { if (config.runDir) return agents.u
 for (const sig of ['SIGTERM', 'SIGINT'] as const) {
   process.on(sig, () => {
     server.close()
+    dokployDaemon?.close()
     db.close()
     process.exit(0)
   })

@@ -156,7 +156,7 @@ export function createApp({ db, config }: { db: Db; config: Config }) {
     const s = await claude.create(user, {
       prompt: [
         prompt.trim(),
-        'Use `hosting_monitor`, `hosting_list`, `hosting_get`, `hosting_logs`, and `services_list` to inspect live server CPU, memory, disk, network throughput, and Docker/Dokploy containers, then diagnose or resolve the issue.',
+        'Use `hosting_monitor`, `hosting_list`, `hosting_get`, `hosting_logs`, `hosting_update`, and `hosting_action` to inspect the live health, HTTP/TCP response latency, uptime, container resources, and logs of hosted applications, compose stacks, and databases, then diagnose or resolve the issue.',
       ].join('\n\n'),
       images: [], cwd: '', profile: d?.profile ?? 'default', model: d?.model ?? null, effort: d?.effort ?? null,
       permissionMode: d?.permission_mode ?? 'bypassPermissions', mode: 'chat',

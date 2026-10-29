@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { openDb } from '../../core/db.ts'
 import { agentsService } from '../agents/service.ts'
+import { monitorService } from '../monitor/service.ts'
+import { startBundledDokployDaemon } from './dokploy-daemon.ts'
 import { hostingService } from './service.ts'
 
 test('hostingService talks to bundled Dokploy via x-agos-key and exposes create, update, domain, log, and action MCP tools', async () => {
@@ -106,5 +111,63 @@ test('hostingService talks to bundled Dokploy via x-agos-key and exposes create,
   } finally {
     globalThis.fetch = origFetch
     db.close()
+  }
+})
+
+test('startBundledDokployDaemon runs on local port, serves Studio & API, and monitorService tracks hosted apps', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'agos-dokploy-test-'))
+  const port = 33110
+  const daemon = await startBundledDokployDaemon({ port, dataDir: tmp, masterKey: 'test-key-123' })
+  assert.ok(daemon, 'Bundled Dokploy daemon should start')
+
+  const db = openDb(':memory:')
+  const user = { id: 1, username: 'alice', name: 'Alice', email: 'a@b.c', role: 'admin' as const }
+  const agents = agentsService({ runDir: '' })
+  const hosting = hostingService({
+    config: {
+      url: `http://127.0.0.1:${port}`,
+      apiKey: null,
+      masterKey: 'test-key-123',
+      domain: null,
+      dashboardUrl: `http://127.0.0.1:${port}`,
+    },
+    agents,
+    db,
+  })
+  const monitor = monitorService({ hosting, agents })
+
+  try {
+    const st = await hosting.status()
+    assert.equal(st.reachable, true)
+
+    const studioHtml = await fetch(`http://127.0.0.1:${port}/`).then((r) => r.text())
+    assert.ok(studioHtml.includes('Dokploy Studio'))
+
+    const created = await hosting.create(user, {
+      name: 'demo-web',
+      source: { type: 'docker', image: 'nginx:alpine' },
+      port: 8080,
+      deploy: true,
+    })
+    assert.ok(created.id)
+
+    const dbCreated = await hosting.createDatabase(user, {
+      kind: 'postgres',
+      name: 'demo-pg',
+      deploy: true,
+    })
+    assert.ok(dbCreated.id)
+
+    const snap = await monitor.snapshot()
+    assert.equal(snap.summary.total, 2)
+    assert.equal(snap.summary.appsCount, 1)
+    assert.equal(snap.summary.databasesCount, 1)
+    assert.equal(snap.items.length, 2)
+    assert.ok(snap.items.some((i) => i.name === 'demo-web'))
+    assert.ok(snap.items.some((i) => i.name === 'demo-pg' && i.kind === 'postgres'))
+  } finally {
+    daemon.close()
+    db.close()
+    rmSync(tmp, { recursive: true, force: true })
   }
 })
