@@ -14,7 +14,7 @@ import { Spinner } from '@/components/ui/spinner'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { api, unwrap } from '@/lib/api'
 import { ErrorAlert } from '../auth/LoginPage'
-import { FALLBACK_MODELS, PERMISSION_MODES, profilesQuery, type PermissionMode } from './data'
+import { FALLBACK_MODELS, PERMISSION_MODES, profilesQuery, QUICK_DEFAULT_MODELS, type PermissionMode } from './data'
 import { describeMemory, memoryQuery } from './memory'
 
 type Profile = { name: string; loggedIn: boolean; authMethod: string | null; email: string | null; plan: string | null; memory: boolean }
@@ -353,7 +353,8 @@ function DefaultsCard({ profiles, initial }: { profiles: Profile[]; initial: Def
     <SettingsSection title="Defaults for new sessions" description="You can change any of these per session.">
         <FieldGroup>
           {profiles.length > 1 && <Row id="d-profile" label="Profile" value={d.profile} onPick={(v) => set({ profile: v })} options={profiles.map((p) => ({ value: p.name, label: p.name }))} />}
-          <Row id="d-model" label="Model" value={d.model ?? ''} onPick={(v) => set({ model: v || null })} options={FALLBACK_MODELS.map((m) => ({ value: m.value, label: m.displayName }))} />
+          <Row id="d-model" label="Default AI CLI / Model" value={d.model ?? ''} onPick={(v) => set({ model: v || null })} options={QUICK_DEFAULT_MODELS.map((m) => ({ value: m.value, label: m.displayName }))}
+            description="Choose Claude Code (Default, Opus, Sonnet, Haiku) or another AI CLI (OpenCode CLI, OpenRouter CLI, Codex CLI, Antigravity CLI, Grok CLI)." />
           <Row id="d-perm" label="Permissions" value={d.permission_mode} onPick={(v) => set({ permission_mode: v })}
             options={PERMISSION_MODES.map((p) => ({ value: p.value, label: p.label }))} description={PERMISSION_MODES.find((p) => p.value === d.permission_mode)?.hint} />
           <Row id="d-open" label="Open sessions in" value={d.open_in} onPick={(v) => set({ open_in: v as 'chat' | 'cli' })} options={[{ value: 'chat', label: 'Chat' }, { value: 'cli', label: 'CLI' }]} />

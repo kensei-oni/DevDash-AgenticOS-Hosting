@@ -31,4 +31,19 @@ test('models group by family, newest first, the default says what it is', () => 
   const all = ['low', 'medium', 'high', 'xhigh', 'max']
   assert.deepEqual(effortLevels(list, 'claude-haiku-4-5-20251001', all), ['low', 'high'])
   assert.deepEqual(effortLevels(list, 'fable', all), all, 'unknown support: offer everything')
+
+  // Multi-CLI agent models group into cliFamilies and display their labels cleanly
+  const withClis: ModelInfo[] = [
+    ...list,
+    { value: 'opencode', displayName: 'OpenCode CLI', cli: 'opencode' },
+    { value: 'openrouter', displayName: 'OpenRouter CLI', cli: 'openrouter' },
+    { value: 'openrouter:anthropic/claude-sonnet-4', displayName: 'OpenRouter · Claude Sonnet 4', cli: 'openrouter' },
+    { value: 'codex', displayName: 'Codex CLI', cli: 'codex' },
+    { value: 'antigravity', displayName: 'Antigravity CLI (agy)', cli: 'antigravity' },
+    { value: 'grok', displayName: 'Grok CLI (xAI)', cli: 'grok' },
+  ]
+  const groupedClis = groupModels(withClis)
+  assert.deepEqual(groupedClis.cliFamilies.map((f) => f.name), ['OpenCode CLI', 'OpenRouter CLI', 'Codex CLI', 'Antigravity CLI', 'Grok CLI'])
+  assert.equal(modelLabel(withClis, 'opencode'), 'OpenCode CLI')
+  assert.equal(modelLabel(withClis, 'openrouter:anthropic/claude-sonnet-4'), 'OpenRouter · Claude Sonnet 4')
 })

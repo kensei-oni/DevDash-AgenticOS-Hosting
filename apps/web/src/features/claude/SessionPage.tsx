@@ -486,7 +486,9 @@ type Updater = (v: {
 /** Model, effort and permissions, changed in place from the chip row. */
 function ModelMenu({ s, disabled, isOwner, onUpdate }: { s: Session; disabled: boolean; isOwner: boolean; onUpdate: Updater }) {
   const models = useQuery({ ...commandsQuery(s.profile), enabled: !disabled }).data?.models as ModelInfo[] | undefined
-  const list: ModelInfo[] = models?.length ? models : FALLBACK_MODELS
+  const list: ModelInfo[] = models?.length
+    ? [...models, ...FALLBACK_MODELS.filter((m) => m.cli && !models.some((o) => o.value === m.value))]
+    : FALLBACK_MODELS
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild disabled={disabled}>

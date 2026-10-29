@@ -286,3 +286,196 @@ export function cliTerminalLaunch(id: string): { env: Record<string, string>; sc
       return null
   }
 }
+
+export type CliModelInfo = {
+  value: string
+  displayName: string
+  description?: string
+  cli?: CliId
+  resolvedModel?: string
+  supportedEffortLevels?: string[]
+}
+
+/**
+ * Multi-CLI agent models selectable directly from the Model picker across agOS.
+ * Choosing any of these models runs that CLI agent (or routes through its provider API/CLI) in both Chat and CLI modes.
+ */
+export function extraCliModels(): CliModelInfo[] {
+  const cfg = readCliConfig()
+  const orDefault = cfg.OPENROUTER_MODEL || 'anthropic/claude-sonnet-4'
+  return [
+    {
+      value: 'opencode',
+      displayName: 'OpenCode CLI',
+      description: 'OpenCode terminal coding agent · Full agOS Hosting & Browser MCP',
+      cli: 'opencode',
+    },
+    {
+      value: 'openrouter',
+      displayName: `OpenRouter CLI (${orDefault.split('/').pop()})`,
+      description: `OpenRouter Agent CLI · ${orDefault} · All agOS MCP tools`,
+      cli: 'openrouter',
+      resolvedModel: orDefault,
+    },
+    {
+      value: 'openrouter:anthropic/claude-sonnet-4',
+      displayName: 'OpenRouter · Claude Sonnet 4',
+      description: 'OpenRouter CLI · anthropic/claude-sonnet-4',
+      cli: 'openrouter',
+      resolvedModel: 'anthropic/claude-sonnet-4',
+    },
+    {
+      value: 'openrouter:google/gemini-2.5-pro',
+      displayName: 'OpenRouter · Gemini 2.5 Pro',
+      description: 'OpenRouter CLI · google/gemini-2.5-pro',
+      cli: 'openrouter',
+      resolvedModel: 'google/gemini-2.5-pro',
+    },
+    {
+      value: 'openrouter:deepseek/deepseek-r1',
+      displayName: 'OpenRouter · DeepSeek R1',
+      description: 'OpenRouter CLI · deepseek/deepseek-r1',
+      cli: 'openrouter',
+      resolvedModel: 'deepseek/deepseek-r1',
+    },
+    {
+      value: 'codex',
+      displayName: 'Codex CLI',
+      description: 'OpenAI Codex CLI agent · Full workspace & agOS MCP integration',
+      cli: 'codex',
+    },
+    {
+      value: 'codex:o3',
+      displayName: 'Codex CLI · o3',
+      description: 'OpenAI Codex CLI · o3 reasoning model',
+      cli: 'codex',
+      resolvedModel: 'o3',
+    },
+    {
+      value: 'codex:gpt-4.1',
+      displayName: 'Codex CLI · GPT-4.1',
+      description: 'OpenAI Codex CLI · gpt-4.1 coding model',
+      cli: 'codex',
+      resolvedModel: 'gpt-4.1',
+    },
+    {
+      value: 'antigravity',
+      displayName: 'Antigravity CLI (agy)',
+      description: 'Google Antigravity CLI · Agentic coding with agOS MCP tools',
+      cli: 'antigravity',
+    },
+    {
+      value: 'antigravity:gemini-2.5-pro',
+      displayName: 'Antigravity CLI · Gemini 2.5 Pro',
+      description: 'Google Antigravity CLI · gemini-2.5-pro',
+      cli: 'antigravity',
+      resolvedModel: 'gemini-2.5-pro',
+    },
+    {
+      value: 'antigravity:gemini-2.5-flash',
+      displayName: 'Antigravity CLI · Gemini 2.5 Flash',
+      description: 'Google Antigravity CLI · gemini-2.5-flash',
+      cli: 'antigravity',
+      resolvedModel: 'gemini-2.5-flash',
+    },
+    {
+      value: 'grok',
+      displayName: 'Grok CLI (xAI)',
+      description: 'xAI Grok CLI agent · Pre-wired with ~/.grok/mcp-config.json',
+      cli: 'grok',
+    },
+    {
+      value: 'grok:grok-4',
+      displayName: 'Grok CLI · Grok 4',
+      description: 'xAI Grok CLI · grok-4 flagship model',
+      cli: 'grok',
+      resolvedModel: 'grok-4',
+    },
+    {
+      value: 'grok:grok-code-fast-1',
+      displayName: 'Grok CLI · Grok Code Fast 1',
+      description: 'xAI Grok CLI · grok-code-fast-1 coding model',
+      cli: 'grok',
+      resolvedModel: 'grok-code-fast-1',
+    },
+  ]
+}
+
+/** Parses a selected model value into its CLI provider and sub-model (if any). */
+export function parseCliModel(model: string | null | undefined): { cli: CliId; subModel: string | null } {
+  const raw = (model ?? '').trim()
+  if (!raw || raw === 'default') return { cli: 'claude', subModel: null }
+  const lower = raw.toLowerCase()
+  for (const id of ['opencode', 'openrouter', 'codex', 'antigravity', 'grok'] as const) {
+    if (lower === id) return { cli: id, subModel: null }
+    if (lower.startsWith(`${id}:`)) return { cli: id, subModel: raw.slice(id.length + 1).trim() || null }
+  }
+  if (lower === 'agy' || lower.startsWith('agy:')) {
+    return { cli: 'antigravity', subModel: raw.includes(':') ? raw.slice(raw.indexOf(':') + 1).trim() || null : null }
+  }
+  return { cli: 'claude', subModel: raw }
+}
+
+/**
+ * Env overrides when running a session in Chat mode or CLI mode for a given model choice.
+ * Allows OpenRouter, Grok (xAI Anthropic-compatible endpoint), OpenCode, Codex, and Antigravity models to work seamlessly.
+ */
+export function modelSessionEnv(model: string | null | undefined): { env: Record<string, string>; sdkModel?: string } {
+  const { cli, subModel } = parseCliModel(model)
+  const cfg = readCliConfig()
+  const base = cliEnv(cli === 'openrouter' ? 'openrouter' : undefined)
+
+  if (cli === 'openrouter') {
+    const target = subModel || cfg.OPENROUTER_MODEL || 'anthropic/claude-sonnet-4'
+    return {
+      env: {
+        ...base,
+        ANTHROPIC_BASE_URL: 'https://openrouter.ai/api',
+        ...(cfg.OPENROUTER_API_KEY ? { ANTHROPIC_AUTH_TOKEN: cfg.OPENROUTER_API_KEY } : {}),
+        ANTHROPIC_MODEL: target,
+      },
+      sdkModel: target,
+    }
+  }
+
+  if (cli === 'grok') {
+    const target = subModel || 'grok-4'
+    if (cfg.XAI_API_KEY) {
+      return {
+        env: {
+          ...base,
+          ANTHROPIC_BASE_URL: 'https://api.x.ai',
+          ANTHROPIC_AUTH_TOKEN: cfg.XAI_API_KEY,
+          ANTHROPIC_MODEL: target,
+        },
+        sdkModel: target,
+      }
+    }
+    return { env: base, sdkModel: undefined }
+  }
+
+  if (cli === 'opencode' || cli === 'codex' || cli === 'antigravity') {
+    // If OpenRouter key is configured, allow Claude SDK fallback to route via OpenRouter when running in Chat mode
+    if (cfg.OPENROUTER_API_KEY && !cfg.ANTHROPIC_API_KEY) {
+      const fallbackModel =
+        cli === 'codex'
+          ? `openai/${subModel || 'gpt-4.1'}`
+          : cli === 'antigravity'
+            ? `google/${subModel || 'gemini-2.5-pro'}`
+            : cfg.OPENROUTER_MODEL || 'anthropic/claude-sonnet-4'
+      return {
+        env: {
+          ...base,
+          ANTHROPIC_BASE_URL: 'https://openrouter.ai/api',
+          ANTHROPIC_AUTH_TOKEN: cfg.OPENROUTER_API_KEY,
+          ANTHROPIC_MODEL: fallbackModel,
+        },
+        sdkModel: fallbackModel,
+      }
+    }
+    return { env: base, sdkModel: undefined }
+  }
+
+  return { env: base, sdkModel: subModel ?? undefined }
+}
+

@@ -1,19 +1,38 @@
-// Claude Code's model list, organised for people: the default (and what it really is), then one entry per family
-// (Opus, Sonnet, ...) holding its versions, newest first. Built from whatever Claude Code reports, so new models and
-// new families show up on their own.
+// Claude Code's model list + Multi-CLI agents (OpenCode CLI, OpenRouter CLI, Codex CLI, Antigravity CLI, Grok CLI),
+// organised for people: the default (and what it really is), then one entry per family (Opus, Sonnet, ...) holding
+// its versions, newest first, plus AI Agent CLIs.
 
 export type ModelInfo = {
   value: string
   displayName: string
   description?: string
+  /** Optional CLI identifier ('opencode' | 'openrouter' | 'codex' | 'antigravity' | 'grok') when the option selects another AI CLI. */
+  cli?: string
   /** The model ID a row stands for ('opus' → 'claude-opus-5-5'); 'default' resolves too. */
   resolvedModel?: string
   supportedEffortLevels?: string[]
 }
 export type ModelRow = ModelInfo & { version: number[]; newest: boolean }
-export type ModelFamily = { name: string; rows: ModelRow[] }
+export type ModelFamily = { name: string; rows: ModelRow[]; isCli?: boolean }
 
 export const isDefaultModel = (v: string | null | undefined) => !v || v === 'default'
+
+const CLI_FAMILY_NAMES: Record<string, string> = {
+  opencode: 'OpenCode CLI',
+  openrouter: 'OpenRouter CLI',
+  codex: 'Codex CLI',
+  antigravity: 'Antigravity CLI',
+  grok: 'Grok CLI',
+}
+
+export function detectCliFamily(m: ModelInfo): string | null {
+  if (m.cli && CLI_FAMILY_NAMES[m.cli]) return CLI_FAMILY_NAMES[m.cli]!
+  const v = m.value.toLowerCase()
+  for (const [prefix, label] of Object.entries(CLI_FAMILY_NAMES)) {
+    if (v === prefix || v.startsWith(`${prefix}:`)) return label
+  }
+  return null
+}
 
 /** "claude-opus-4-8" → opus, [4, 8]; dates like 20251001 aren't versions. Falls back to the display name. */
 function parse(m: ModelInfo) {
@@ -36,8 +55,16 @@ const newerFirst = (a: number[], b: number[]) => {
 export function groupModels(models: ModelInfo[]) {
   const def = models.find((m) => isDefaultModel(m.value))
   const families: ModelFamily[] = []
+  const cliFamilies: ModelFamily[] = []
   for (const m of models) {
     if (m === def) continue
+    const cliName = detectCliFamily(m)
+    if (cliName) {
+      let cf = cliFamilies.find((x) => x.name === cliName)
+      if (!cf) cliFamilies.push((cf = { name: cliName, rows: [], isCli: true }))
+      cf.rows.push({ ...m, version: [], newest: !m.value.includes(':') })
+      continue
+    }
     const { family, version } = parse(m)
     const name = family.charAt(0).toUpperCase() + family.slice(1)
     let f = families.find((x) => x.name === name)
@@ -50,7 +77,7 @@ export function groupModels(models: ModelInfo[]) {
     ? models.find((m) => m !== def && def.resolvedModel && m.resolvedModel === def.resolvedModel)?.displayName
       ?? def.description?.split('·')[0]?.trim()
     : undefined
-  return { def, defName: defName || undefined, families }
+  return { def, defName: defName || undefined, families, cliFamilies }
 }
 
 /** What a picker shows: "Default · Opus 5.5", a model's name, or the raw ID for one typed in by hand. */

@@ -15,7 +15,7 @@ import { getPorts } from './tailscale.ts'
 import { startForwarder, writeSshHelper } from './tailnet-session.ts'
 import * as storage from './storage.ts'
 import { guestMay } from './guest.ts'
-import { cliEnv } from './ai-clis.ts'
+import { cliEnv, cliTerminalLaunch, extraCliModels, modelSessionEnv, parseCliModel, readCliConfig } from './ai-clis.ts'
 
 export const PLUGIN_DIR = fileURLToPath(new URL('../../../packages/claude-plugin', import.meta.url))
 export const PROFILE_RE = /^[a-z0-9][a-z0-9-]{0,20}$/
@@ -245,11 +245,12 @@ const ensureStorage = (l: Launch) =>
 
 async function startChat(l: Launch): Promise<Chat> {
   validate(l)
-  await requireLogin(l.profile)
+  await requireLogin(l.profile, l.model)
   await ensureStorage(l)
   const sdk = await loadSdk()
   // Route this session through the owner's tailnet when asked (env + an optional MCP forwarder); off → null.
   const tn = await setupTailnet(l).catch((err: Error) => { console.error(`[${l.id.slice(0, 8)}] tailnet:`, err.message); return null })
+  const { env: cliModelEnv, sdkModel } = modelSessionEnv(l.model)
   const inbox = new Inbox()
   const pending = new Map<string, Pending>()
   let chat: Chat | undefined
@@ -270,11 +271,11 @@ async function startChat(l: Launch): Promise<Chat> {
     prompt: inbox,
     options: {
       cwd: l.cwd,
-      env: { ...process.env, ...profileEnv(l.profile), DEVDASH_SESSION_ID: l.id, ...(tn?.env ?? {}) },
+      env: { ...process.env, ...profileEnv(l.profile), ...cliModelEnv, DEVDASH_SESSION_ID: l.id, ...(tn?.env ?? {}) },
       ...(tn?.mcpServers ? { mcpServers: tn.mcpServers } : {}),
       pathToClaudeCodeExecutable: CLAUDE_BIN,
       ...(l.started ? { resume: l.id } : { sessionId: l.id }),
-      ...(l.model ? { model: l.model } : {}),
+      ...(sdkModel ? { model: sdkModel } : {}),
       ...(l.effort ? { effort: l.effort } : {}),
       // The SDK keeps fast mode off unless the session's flag settings ask for it.
       ...(l.fast ? { settings: { fastMode: true } } : {}),
@@ -479,7 +480,20 @@ export async function setOption(id: string, key: 'model' | 'permissionMode' | 'e
     c.launch = { ...c.launch, guestCaps: Array.isArray(value) ? value.filter((v) => typeof v === 'string') : [] }
     return
   }
-  if (key === 'model') await c.q.setModel((value as string | null) ?? undefined)
+  if (key === 'model') {
+    const nextModel = (value as string | null) ?? null
+    const prevCli = parseCliModel(c.launch.model).cli
+    const nextParsed = parseCliModel(nextModel)
+    c.launch = { ...c.launch, model: nextModel }
+    // If switching between different CLI providers (e.g. Claude -> OpenRouter or Grok), close idle process so next turn uses new provider env
+    if (prevCli !== nextParsed.cli && c.status === 'idle' && !c.pending.size) {
+      await stopChat(c)
+      return
+    }
+    const { sdkModel } = modelSessionEnv(nextModel)
+    await c.q.setModel(sdkModel ?? undefined)
+    return
+  }
   else if (key === 'permissionMode') await c.q.setPermissionMode(value as PermissionMode)
   else if (key === 'fast') await c.q.applyFlagSettings({ fastMode: value === true })
   else await c.q.applyFlagSettings({ effortLevel: value })
@@ -525,22 +539,33 @@ async function openCliNow(l: Launch, cols: number, rows: number) {
   await ensureStorage(l)
   // Route this session through the owner's tailnet when asked (env + an optional MCP forwarder); off → null.
   const tn = await setupTailnet(l).catch((err: Error) => { console.error(`[${l.id.slice(0, 8)}] tailnet:`, err.message); return null })
-  const args = [CLAUDE_BIN, ...(l.started ? ['--resume', l.id] : ['--session-id', l.id]), '--plugin-dir', PLUGIN_DIR, '--append-system-prompt', systemAppend(l)]
-  if (l.toolPolicy?.tools?.length) args.push('--tools', l.toolPolicy.tools.join(','))
-  if (l.toolPolicy?.allow?.length) args.push('--allowedTools', l.toolPolicy.allow.join(','))
-  if (l.model) args.push('--model', l.model)
-  if (l.effort) args.push('--effort', l.effort)
-  if (l.fast) args.push('--settings', JSON.stringify({ fastMode: true }))
-  if (l.remote) args.push('--remote-control')
-  if (tn?.mcpServers) args.push('--mcp-config', JSON.stringify({ mcpServers: tn.mcpServers }))
-  args.push(...(l.permissionMode === 'bypassPermissions' ? ['--dangerously-skip-permissions'] : ['--permission-mode', l.permissionMode]))
+  const parsed = parseCliModel(l.model)
+  const { env: cliModelEnv, sdkModel } = modelSessionEnv(l.model)
+
+  let args: string[]
+  if (parsed.cli !== 'claude' && parsed.cli !== 'openrouter') {
+    const spec = cliTerminalLaunch(parsed.cli)
+    const modelArg = parsed.subModel ? ` --model "${parsed.subModel.replace(/"/g, '')}"` : ''
+    const script = spec ? (parsed.subModel ? spec.script.replace(/exec ([^\s;]+)/g, `exec $1${modelArg}`) : spec.script) : CLAUDE_BIN
+    args = ['bash', '-lc', script]
+  } else {
+    args = [CLAUDE_BIN, ...(l.started ? ['--resume', l.id] : ['--session-id', l.id]), '--plugin-dir', PLUGIN_DIR, '--append-system-prompt', systemAppend(l)]
+    if (l.toolPolicy?.tools?.length) args.push('--tools', l.toolPolicy.tools.join(','))
+    if (l.toolPolicy?.allow?.length) args.push('--allowedTools', l.toolPolicy.allow.join(','))
+    if (sdkModel) args.push('--model', sdkModel)
+    if (l.effort) args.push('--effort', l.effort)
+    if (l.fast) args.push('--settings', JSON.stringify({ fastMode: true }))
+    if (l.remote) args.push('--remote-control')
+    if (tn?.mcpServers) args.push('--mcp-config', JSON.stringify({ mcpServers: tn.mcpServers }))
+    args.push(...(l.permissionMode === 'bypassPermissions' ? ['--dangerously-skip-permissions'] : ['--permission-mode', l.permissionMode]))
+  }
   // The classic renderer, not the full-screen one: the conversation flows into the terminal's history, so it scrolls
   // all the way back (phones included) and can be selected and copied in the browser.
-  const env = Object.entries({ ...profileEnv(l.profile), DEVDASH_SESSION_ID: l.id, CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: '1', ...(tn?.env ?? {}) }).flatMap(([k, v]) => ['-e', `${k}=${v}`])
+  const env = Object.entries({ ...profileEnv(l.profile), ...cliModelEnv, DEVDASH_SESSION_ID: l.id, CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: '1', ...(tn?.env ?? {}) }).flatMap(([k, v]) => ['-e', `${k}=${v}`])
   try {
     await tmux('new-session', '-d', '-s', cliName(l.id), '-c', l.cwd, '-x', String(cols), '-y', String(rows), ...env, ...args)
   } catch (err) {
-    if (!/duplicate session/.test((err as Error).message)) throw new Error('Could not start the Claude CLI. Try again in a moment.')
+    if (!/duplicate session/.test((err as Error).message)) throw new Error('Could not start the CLI. Try again in a moment.')
   }
   emit({ ev: 'claude.status', id: l.id, status: 'idle', mode: 'cli' })
 }
@@ -859,7 +884,11 @@ export async function commandsAndModels(profile: string) {
     }
     await Promise.race([job.catch(() => {}), new Promise((r) => setTimeout(r, 15_000))])
   }
-  return { commands: commandCache.get(profile) ?? [], models: modelCache.get(profile) ?? [] }
+  const baseModels = (modelCache.get(profile) ?? []) as { value: string; displayName: string; description?: string }[]
+  const cliModels = extraCliModels()
+  const existing = new Set(baseModels.map((m) => m.value))
+  const merged = [...baseModels, ...cliModels.filter((m) => !existing.has(m.value))]
+  return { commands: commandCache.get(profile) ?? [], models: merged }
 }
 
 /**
@@ -916,10 +945,18 @@ export const profiles = () => Promise.all(profileNames().map(authStatus))
 
 // Without a login the SDK process waits silently; say so up front instead. Checked at most every 5 minutes.
 const loginChecked = new Map<string, number>()
-async function requireLogin(profile: string) {
+async function requireLogin(profile: string, model?: string | null) {
+  const cfg = readCliConfig()
+  const parsed = parseCliModel(model)
+  if (parsed.cli === 'openrouter' && cfg.OPENROUTER_API_KEY) return
+  if (parsed.cli === 'grok' && cfg.XAI_API_KEY) return
+  if (parsed.cli === 'codex' && (cfg.OPENAI_API_KEY || cfg.OPENROUTER_API_KEY)) return
+  if (parsed.cli === 'antigravity' && (cfg.GEMINI_API_KEY || cfg.OPENROUTER_API_KEY)) return
+  if (parsed.cli === 'opencode' && (cfg.OPENROUTER_API_KEY || cfg.ANTHROPIC_API_KEY || cfg.OPENAI_API_KEY)) return
+  if (cfg.ANTHROPIC_API_KEY) return
   if ((loginChecked.get(profile) ?? 0) > Date.now() - 5 * 60_000) return
   if (!(await authStatus(profile)).loggedIn) {
-    throw new Error(`The ${profile === 'default' ? 'default' : `"${profile}"`} Claude profile isn't signed in. Open Claude setup and sign in first.`)
+    throw new Error(`The ${profile === 'default' ? 'default' : `"${profile}"`} Claude profile isn't signed in. Open Claude setup to sign in or configure your CLI API keys.`)
   }
   loginChecked.set(profile, Date.now())
 }
@@ -961,14 +998,15 @@ export async function usage(profile: string) {
  */
 export async function complete(profile: string, prompt: string, o: { model?: string; system?: string } = {}) {
   if (!PROFILE_RE.test(profile)) throw new Error('invalid profile')
-  await requireLogin(profile)
+  await requireLogin(profile, o.model)
+  const { env: cliModelEnv, sdkModel } = modelSessionEnv(o.model)
   const inbox = new Inbox()
   const q = (await loadSdk()).query({
     prompt: inbox,
     options: {
-      cwd: homedir(), env: { ...process.env, ...profileEnv(profile) }, pathToClaudeCodeExecutable: CLAUDE_BIN,
+      cwd: homedir(), env: { ...process.env, ...profileEnv(profile), ...cliModelEnv }, pathToClaudeCodeExecutable: CLAUDE_BIN,
       persistSession: false, settingSources: [], tools: [], maxTurns: 1,
-      ...(o.model ? { model: o.model } : {}), ...(o.system ? { systemPrompt: o.system } : {}),
+      ...(sdkModel ? { model: sdkModel } : {}), ...(o.system ? { systemPrompt: o.system } : {}),
     },
   })
   inbox.push({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: prompt }] }, parent_tool_use_id: null })

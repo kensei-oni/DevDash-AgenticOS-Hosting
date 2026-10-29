@@ -171,9 +171,11 @@ export function NewSession({ open, onClose, initialPrompt = '', initialCwd, init
 
   const profiles = (setup.data?.profiles as { name: string; loggedIn: boolean }[] | undefined) ?? []
   const chosen = profiles.find((p) => p.name === profile)
-  // The models this Claude Code offers (with their versions in the description); a fixed list until it answers.
+  // The models this Claude Code offers (with their versions in the description), merged with all configured AI Agent CLIs.
   const offered = useQuery({ ...commandsQuery(profile), enabled: open }).data?.models as ModelInfo[] | undefined
-  const models: ModelInfo[] = offered?.length ? offered : FALLBACK_MODELS
+  const models: ModelInfo[] = offered?.length
+    ? [...offered, ...FALLBACK_MODELS.filter((m) => m.cli && !offered.some((o) => o.value === m.value))]
+    : FALLBACK_MODELS
   const pickedModel = customModel ? undefined : isDefaultModel(model) ? groupModels(models).def : models.find((m) => m.value === model)
   const create = useMutation({
     mutationFn: () => unwrap(api.api.claude.sessions.$post({
@@ -233,13 +235,13 @@ export function NewSession({ open, onClose, initialPrompt = '', initialCwd, init
           {profiles.length > 1 && (
             <Choice id="ns-profile" label="Claude profile" value={profile} onChange={setProfile} options={profiles.map((p) => ({ value: p.name, label: p.name }))} />
           )}
-          {chosen && !chosen.loggedIn && (
+          {chosen && !chosen.loggedIn && (!model || model === 'default' || model.startsWith('claude') || ['opus', 'sonnet', 'haiku'].includes(model)) && (
             <Alert variant="destructive">
-              <AlertDescription>This profile isn't signed in to Claude. <Link to="/claude/setup" className="underline" onClick={onClose}>Sign in first</Link>.</AlertDescription>
+              <AlertDescription>This profile isn't signed in to Claude. <Link to="/claude/setup" className="underline" onClick={onClose}>Sign in or configure CLI keys</Link>.</AlertDescription>
             </Alert>
           )}
           <Field>
-            <FieldLabel htmlFor="ns-model">Model</FieldLabel>
+            <FieldLabel htmlFor="ns-model">AI CLI &amp; Model</FieldLabel>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button id="ns-model" type="button" variant="outline" className="h-10 w-full justify-between font-normal">

@@ -106,11 +106,38 @@ export const PERMISSION_MODES: { value: PermissionMode; label: string; hint: str
 export const modeLabel = (m: string) => PERMISSION_MODES.find((p) => p.value === m)?.label ?? m
 
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
-export const FALLBACK_MODELS: { value: string; displayName: string; description?: string }[] = [
-  { value: '', displayName: 'Default' },
+export const FALLBACK_MODELS: { value: string; displayName: string; description?: string; cli?: string }[] = [
+  { value: '', displayName: 'Default', description: 'Claude Code recommended model' },
+  { value: 'opus', displayName: 'Opus', description: 'Claude Opus · Most capable for complex tasks' },
+  { value: 'sonnet', displayName: 'Sonnet', description: 'Claude Sonnet · Balanced speed & intelligence' },
+  { value: 'haiku', displayName: 'Haiku', description: 'Claude Haiku · Fast & lightweight' },
+  { value: 'opencode', displayName: 'OpenCode CLI', description: 'OpenCode terminal coding agent · Full agOS MCP', cli: 'opencode' },
+  { value: 'openrouter', displayName: 'OpenRouter CLI', description: 'OpenRouter Agent CLI · Any OpenRouter model', cli: 'openrouter' },
+  { value: 'openrouter:anthropic/claude-sonnet-4', displayName: 'OpenRouter · Claude Sonnet 4', description: 'OpenRouter CLI · anthropic/claude-sonnet-4', cli: 'openrouter' },
+  { value: 'openrouter:google/gemini-2.5-pro', displayName: 'OpenRouter · Gemini 2.5 Pro', description: 'OpenRouter CLI · google/gemini-2.5-pro', cli: 'openrouter' },
+  { value: 'openrouter:deepseek/deepseek-r1', displayName: 'OpenRouter · DeepSeek R1', description: 'OpenRouter CLI · deepseek/deepseek-r1', cli: 'openrouter' },
+  { value: 'codex', displayName: 'Codex CLI', description: 'OpenAI Codex CLI agent · Full workspace & MCP', cli: 'codex' },
+  { value: 'codex:o3', displayName: 'Codex CLI · o3', description: 'OpenAI Codex CLI · o3 reasoning model', cli: 'codex' },
+  { value: 'codex:gpt-4.1', displayName: 'Codex CLI · GPT-4.1', description: 'OpenAI Codex CLI · gpt-4.1 coding model', cli: 'codex' },
+  { value: 'antigravity', displayName: 'Antigravity CLI (agy)', description: 'Google Antigravity CLI · Agentic coding with agOS MCP', cli: 'antigravity' },
+  { value: 'antigravity:gemini-2.5-pro', displayName: 'Antigravity CLI · Gemini 2.5 Pro', description: 'Google Antigravity CLI · gemini-2.5-pro', cli: 'antigravity' },
+  { value: 'antigravity:gemini-2.5-flash', displayName: 'Antigravity CLI · Gemini 2.5 Flash', description: 'Google Antigravity CLI · gemini-2.5-flash', cli: 'antigravity' },
+  { value: 'grok', displayName: 'Grok CLI (xAI)', description: 'xAI Grok CLI agent · Pre-wired with agOS MCP', cli: 'grok' },
+  { value: 'grok:grok-4', displayName: 'Grok CLI · Grok 4', description: 'xAI Grok CLI · grok-4 flagship model', cli: 'grok' },
+  { value: 'grok:grok-code-fast-1', displayName: 'Grok CLI · Grok Code Fast 1', description: 'xAI Grok CLI · grok-code-fast-1 coding model', cli: 'grok' },
+]
+
+/** Primary models & AI CLIs shown as quick buttons in Setup -> Defaults for new sessions. */
+export const QUICK_DEFAULT_MODELS: { value: string; displayName: string }[] = [
+  { value: '', displayName: 'Claude (Default)' },
   { value: 'opus', displayName: 'Opus' },
   { value: 'sonnet', displayName: 'Sonnet' },
   { value: 'haiku', displayName: 'Haiku' },
+  { value: 'opencode', displayName: 'OpenCode CLI' },
+  { value: 'openrouter', displayName: 'OpenRouter CLI' },
+  { value: 'codex', displayName: 'Codex CLI' },
+  { value: 'antigravity', displayName: 'Antigravity CLI' },
+  { value: 'grok', displayName: 'Grok CLI' },
 ]
 
 export const relativeTime = (unix: number) => {
