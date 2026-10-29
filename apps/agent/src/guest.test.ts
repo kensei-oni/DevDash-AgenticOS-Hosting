@@ -14,7 +14,7 @@ test('guest turns: the shared project is fine, the owner\'s access waits for the
     mkdirSync(join(home, '.ssh'), { recursive: true })
     writeFileSync(join(project, 'app.ts'), 'x')
     writeFileSync(join(home, '.ssh', 'id_ed25519'), 'secret')
-    symlinkSync(join(home, '.ssh'), join(project, 'keys')) // a link inside the project to the owner's keys
+    symlinkSync(join(home, '.ssh'), join(project, 'keys'), 'junction') // a link inside the project to the owner's keys
     const o = { cwd: project, tailnet: false, roots: [shared] }
 
     // Reading and editing the shared project: the teammate could do that with their own account.

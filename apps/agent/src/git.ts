@@ -4,8 +4,8 @@ import { userInfo } from 'node:os'
 import { promisify } from 'node:util'
 
 // Git as this member, in shared checkouts under /srv/devdash. Never prompts: missing credentials fail fast with a clear message.
-const ROOT = process.env.DEVDASH_PROJECTS_ROOT || '/srv/devdash'
-const PATH_RE = new RegExp(`^${ROOT.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/(projects/[a-z0-9][a-z0-9-]{0,39}|worktrees/[a-z0-9][a-z0-9-]{0,39}/[a-z0-9-]{1,40})$`)
+const rootDir = () => (process.env.DEVDASH_PROJECTS_ROOT || '/srv/devdash').replace(/\\/g, '/')
+const pathRe = () => new RegExp(`^${rootDir().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/(projects/[a-z0-9][a-z0-9-]{0,39}|worktrees/[a-z0-9][a-z0-9-]{0,39}/[a-z0-9-]{1,40})$`)
 const run = promisify(execFile)
 const ENV = {
   ...process.env,
@@ -14,8 +14,10 @@ const ENV = {
 }
 
 function checked(p: unknown) {
-  if (typeof p !== 'string' || !PATH_RE.test(p)) throw new Error('not a DevDash project folder')
-  return p
+  if (typeof p !== 'string') throw new Error('not a DevDash project folder')
+  const norm = p.replace(/\\/g, '/')
+  if (!pathRe().test(norm)) throw new Error('not a DevDash project folder')
+  return norm
 }
 
 async function git(args: string[], timeout = 60_000) {
@@ -80,7 +82,8 @@ export const ops = {
     const url = String(r.url ?? '')
     if (!/^(https:\/\/|git@|ssh:\/\/)[^\s]+$/.test(url)) throw new Error('Use an https:// or git@ repository address.')
     if (existsSync(path)) throw new Error('That folder already exists on the server.')
-    await git(['clone', '--quiet', '--config', 'core.sharedRepository=group', url, path], 15 * 60_000)
+    const sharedArgs = process.platform === 'win32' ? [] : ['--config', 'core.sharedRepository=group']
+    await git(['clone', '--quiet', ...sharedArgs, url, path], 15 * 60_000)
     return { defaultBranch: (await remoteHead(path)) || (await git(['-C', path, 'branch', '--show-current'])).trim() || 'main' }
   },
 
@@ -88,7 +91,8 @@ export const ops = {
   async init(r: Record<string, unknown>) {
     const path = checked(r.path)
     if (existsSync(path)) throw new Error('That folder already exists on the server.')
-    await git(['init', '--quiet', '--initial-branch=main', '--shared=group', path])
+    const sharedArgs = process.platform === 'win32' ? [] : ['--shared=group']
+    await git(['init', '--quiet', '--initial-branch=main', ...sharedArgs, path])
     await git(['-C', path, ...(await identity(path)), 'commit', '--quiet', '--allow-empty', '-m', 'Start'])
     return { defaultBranch: 'main' }
   },

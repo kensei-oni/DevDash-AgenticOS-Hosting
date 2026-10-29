@@ -8,6 +8,7 @@ import { startBundledDokployDaemon } from './modules/hosting/dokploy-daemon.ts'
 import { registerSockets } from './sockets.ts'
 
 const config = loadConfig()
+process.env.DEVDASH_PROJECTS_ROOT = config.projectsRoot
 if (!config.runDir) {
   const sock = process.platform === 'win32'
     ? `\\\\.\\pipe\\devdash-agent-${process.pid}`

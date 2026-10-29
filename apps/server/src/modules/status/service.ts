@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process'
-import { readFileSync, readlinkSync, statfsSync, statSync } from 'node:fs'
-import { cpus, loadavg, uptime } from 'node:os'
+import { existsSync, readFileSync, readlinkSync, statfsSync, statSync } from 'node:fs'
+import { cpus, freemem, loadavg, totalmem, uptime } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import type { Db } from '../../core/db.ts'
 import { requestLine } from '../../core/unix.ts'
@@ -12,6 +13,7 @@ import { memoryHealth } from '../claude/service.ts'
 
 const run = promisify(execFile)
 const read = (path: string) => { try { return readFileSync(path, 'utf8') } catch { return null } }
+const LOCAL_SDK_DIR = fileURLToPath(new URL('../../../../../data/claude-sdk/node_modules/@anthropic-ai/claude-agent-sdk', import.meta.url))
 
 /** One look at the server's health: resources, versions, backups and the parts of DevDash that run on it. */
 export function statusService({ db, agents, services, browser, runDir, dataDir, version }: {
@@ -22,13 +24,23 @@ export function statusService({ db, agents, services, browser, runDir, dataDir, 
   function memory() {
     const info = read('/proc/meminfo')
     const kb = (k: string) => Number(info?.match(new RegExp(`^${k}:\\s+(\\d+)`, 'm'))?.[1] ?? 0) * 1024
-    return info ? { total: kb('MemTotal'), available: kb('MemAvailable'), swapTotal: kb('SwapTotal'), swapFree: kb('SwapFree') } : null
+    if (info) {
+      return { total: kb('MemTotal'), available: kb('MemAvailable'), swapTotal: kb('SwapTotal'), swapFree: kb('SwapFree') }
+    }
+    return { total: totalmem(), available: freemem(), swapTotal: 0, swapFree: 0 }
   }
   function disk() {
     try {
-      const s = statfsSync('/')
+      const s = statfsSync(existsSync('/') ? '/' : dataDir)
       return { total: s.blocks * s.bsize, free: s.bavail * s.bsize }
-    } catch { return null }
+    } catch {
+      try {
+        const s = statfsSync(dataDir)
+        return { total: s.blocks * s.bsize, free: s.bavail * s.bsize }
+      } catch {
+        return null
+      }
+    }
   }
   function release() {
     try {
@@ -40,13 +52,38 @@ export function statusService({ db, agents, services, browser, runDir, dataDir, 
   let claude: { at: number; version: string | null } = { at: 0, version: null }
   async function claudeVersion() {
     if (Date.now() - claude.at < 10 * 60_000) return claude.version
-    const out = await run('/opt/devdash/claude/current/bin/claude', ['--version'], { timeout: 10_000 }).then((r) => r.stdout, () => '')
-    claude = { at: Date.now(), version: out.match(/\d+\.\d+\.\d+/)?.[0] ?? null }
-    return claude.version
+    for (const candidate of ['/opt/devdash/claude/current/bin/claude', 'claude']) {
+      const out = await run(candidate, ['--version'], { timeout: 10_000 }).then((r) => r.stdout, () => '')
+      const ver = out.match(/\d+\.\d+\.\d+/)?.[0]
+      if (ver) {
+        claude = { at: Date.now(), version: ver }
+        return ver
+      }
+    }
+    const localCliJs = join(LOCAL_SDK_DIR, 'cli.js')
+    if (existsSync(localCliJs)) {
+      const out = await run(process.execPath, [localCliJs, '--version'], { timeout: 10_000 }).then((r) => r.stdout, () => '')
+      const ver = out.match(/\d+\.\d+\.\d+/)?.[0] ?? null
+      claude = { at: Date.now(), version: ver }
+      return ver
+    }
+    claude = { at: Date.now(), version: null }
+    return null
   }
 
   // Claude Code comes from the Agent SDK package (deploy/claude-update.sh); the installed SDK version names its folder.
-  const installedSdk = () => { try { return readlinkSync('/opt/devdash/claude/current').split('/').pop() ?? null } catch { return null } }
+  const installedSdk = () => {
+    try {
+      return readlinkSync('/opt/devdash/claude/current').split('/').pop() ?? null
+    } catch {
+      try {
+        const pkg = JSON.parse(readFileSync(join(LOCAL_SDK_DIR, 'package.json'), 'utf8')) as { version?: string }
+        return pkg.version ?? null
+      } catch {
+        return null
+      }
+    }
+  }
   let latest: { at: number; version: string | null } = { at: 0, version: null }
   async function latestSdk() {
     if (Date.now() - latest.at < 60 * 60_000) return latest.version

@@ -140,12 +140,36 @@ const WORDS = [['quiet', 'amber', 'swift', 'bright', 'calm', 'bold', 'lucky', 'm
 const pick = (a: string[]) => a[Math.floor(Math.random() * a.length)]!
 export const sessionFolder = () => `~/projects/${pick(WORDS[0]!)}-${pick(WORDS[1]!)}`
 
+const CLI_AGENTS: { id: string; label: string; defaultModel: string; desc: string }[] = [
+  { id: 'claude', label: 'Claude Code', defaultModel: '', desc: 'Anthropic Claude Code CLI & Agent SDK' },
+  { id: 'opencode', label: 'OpenCode CLI', defaultModel: 'opencode', desc: 'OpenCode terminal & chat coding agent' },
+  { id: 'openrouter', label: 'OpenRouter CLI', defaultModel: 'openrouter', desc: 'OpenRouter multi-model agent CLI' },
+  { id: 'codex', label: 'Codex CLI', defaultModel: 'codex', desc: 'OpenAI Codex coding agent' },
+  { id: 'antigravity', label: 'Antigravity CLI', defaultModel: 'antigravity', desc: 'Google Antigravity (agy) agentic CLI' },
+  { id: 'grok', label: 'Grok CLI', defaultModel: 'grok', desc: 'xAI Grok coding CLI agent' },
+]
+
+function activeCliForModel(model: string): string {
+  const m = (model || '').trim().toLowerCase()
+  for (const id of ['opencode', 'openrouter', 'codex', 'antigravity', 'grok']) {
+    if (m === id || m.startsWith(`${id}:`)) return id
+  }
+  if (m === 'agy' || m.startsWith('agy:')) return 'antigravity'
+  return 'claude'
+}
+
 export function NewSession({ open, onClose, initialPrompt = '', initialCwd, initialProject }: {
   open: boolean; onClose: () => void; initialPrompt?: string; initialCwd?: string; initialProject?: string
 }) {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const setup = useQuery({ ...profilesQuery, enabled: open })
+  const cliStatus = useQuery({
+    queryKey: ['claude', 'clis'],
+    queryFn: () => unwrap(api.api.claude.clis.$get()),
+    enabled: open,
+    staleTime: 15_000,
+  })
   const d = setup.data?.defaults
   const [prompt, setPrompt] = useState(initialPrompt)
   const [cwd, setCwd] = useState(initialCwd ?? sessionFolder)
@@ -171,6 +195,17 @@ export function NewSession({ open, onClose, initialPrompt = '', initialCwd, init
 
   const profiles = (setup.data?.profiles as { name: string; loggedIn: boolean }[] | undefined) ?? []
   const chosen = profiles.find((p) => p.name === profile)
+  const selectedCliId = activeCliForModel(model)
+  const selectedCliMeta = CLI_AGENTS.find((c) => c.id === selectedCliId) ?? CLI_AGENTS[0]!
+  const cliInfo = cliStatus.data?.clis?.find((c) => c.id === selectedCliId)
+  const anyCliKeyConfigured = Boolean(
+    cliStatus.data?.config && Object.entries(cliStatus.data.config).some(([k, v]) => k.endsWith('_API_KEY') && v === true)
+  )
+  const needsAuthWarning =
+    selectedCliId === 'claude'
+      ? Boolean(chosen && !chosen.loggedIn && !anyCliKeyConfigured)
+      : Boolean(cliInfo && !cliInfo.keyConfigured && !cliInfo.installed && !anyCliKeyConfigured)
+
   // The models this Claude Code offers (with their versions in the description), merged with all configured AI Agent CLIs.
   const offered = useQuery({ ...commandsQuery(profile), enabled: open }).data?.models as ModelInfo[] | undefined
   const models: ModelInfo[] = offered?.length
@@ -198,16 +233,77 @@ export function NewSession({ open, onClose, initialPrompt = '', initialCwd, init
   }
 
   return (
-    <ResponsiveDialog open={open} onOpenChange={(v) => !v && onClose()} title="New session" description="Claude works in this folder as you, and keeps going when you close the app.">
+    <ResponsiveDialog
+      open={open}
+      onOpenChange={(v) => !v && onClose()}
+      title="New session"
+      description={`${selectedCliMeta.label} works in this folder as you, with full agOS Hosting, Monitor & Live Browser tools, and keeps going when you close the app.`}
+    >
       <form onSubmit={submit}>
         <FieldGroup className="gap-5">
-          {/* Only when started from something to hand over (a task); otherwise you write to Claude in the session. */}
-          {openIn === 'chat' && initialPrompt && (
-            <Field>
-              <FieldLabel htmlFor="ns-prompt">First message</FieldLabel>
-              <Textarea id="ns-prompt" value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={4} className="min-h-24 text-base md:text-sm" />
-            </Field>
+          <Field>
+            <FieldLabel id="ns-cli-agent">AI Agent CLI</FieldLabel>
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              aria-labelledby="ns-cli-agent"
+              value={selectedCliId}
+              onValueChange={(v) => {
+                if (!v) return
+                const target = CLI_AGENTS.find((c) => c.id === v)
+                if (target) {
+                  setCustomModel(false)
+                  setModel(target.defaultModel)
+                }
+              }}
+              className="grid w-full grid-cols-2 gap-1.5 sm:grid-cols-3"
+            >
+              {CLI_AGENTS.map((c) => (
+                <ToggleGroupItem key={c.id} value={c.id} className="h-9 rounded-lg border px-2.5 text-xs font-medium">
+                  {c.label}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
+            <FieldDescription>
+              {selectedCliMeta.desc} · All 6 CLIs are pre-wired with agOS Hosting, Monitor &amp; Live Browser MCP tools.
+            </FieldDescription>
+          </Field>
+
+          <Field>
+            <FieldLabel htmlFor="ns-model">Model ({selectedCliMeta.label})</FieldLabel>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button id="ns-model" type="button" variant="outline" className="h-10 w-full justify-between font-normal">
+                  <span className="truncate">{customModel ? 'Another model' : modelLabel(models, model)}</span><ChevronDown className="text-muted-foreground" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] w-(--radix-dropdown-menu-trigger-width) max-w-none overflow-y-auto">
+                <ModelChoices models={models} value={customModel ? null : model || null} onChange={(v) => { setCustomModel(false); setModel(v ?? '') }} />
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={() => { setCustomModel(true); setModel('') }}>Another model (enter its ID)</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            {customModel && (
+              <Input aria-label="Model ID" className="h-10 font-mono" placeholder="e.g. openrouter:anthropic/claude-sonnet-4 or claude-opus-4-1" value={model} onChange={(e) => setModel(e.target.value)}
+                spellCheck={false} autoCapitalize="none" autoFocus />
+            )}
+            <FieldDescription>
+              {customModel ? 'Enter any model ID or <cli>:<model> (e.g. openrouter:openai/gpt-4.1, grok:grok-4).'
+                : pickedModel?.description ? `${pickedModel.description}${pickedModel.value && !pickedModel.value.startsWith('claude-') && !pickedModel.cli && !isDefaultModel(pickedModel.value) ? '. Always its newest version.' : ''}`
+                : 'Use the default model or switch between Claude Code, OpenCode, OpenRouter, Codex, Antigravity, and Grok.'}
+            </FieldDescription>
+          </Field>
+
+          {needsAuthWarning && (
+            <Alert variant="destructive">
+              <AlertDescription>
+                {selectedCliId === 'claude'
+                  ? <>This profile isn't signed in to Claude yet. <Link to="/claude/setup" className="underline" onClick={onClose}>Sign in or configure CLI API keys</Link>, or pick another AI Agent CLI above.</>
+                  : <>{selectedCliMeta.label} needs an API key or CLI binary configured. <Link to="/claude/setup" className="underline" onClick={onClose}>Configure {selectedCliMeta.label} in Setup</Link>.</>}
+              </AlertDescription>
+            </Alert>
           )}
+
           {projects.length > 0 && (
             <Field>
               <FieldLabel htmlFor="ns-project">Project</FieldLabel>
@@ -233,37 +329,23 @@ export function NewSession({ open, onClose, initialPrompt = '', initialCwd, init
             </Field>
           )}
           {profiles.length > 1 && (
-            <Choice id="ns-profile" label="Claude profile" value={profile} onChange={setProfile} options={profiles.map((p) => ({ value: p.name, label: p.name }))} />
+            <Choice id="ns-profile" label="Profile" value={profile} onChange={setProfile} options={profiles.map((p) => ({ value: p.name, label: p.name }))} />
           )}
-          {chosen && !chosen.loggedIn && (!model || model === 'default' || model.startsWith('claude') || ['opus', 'sonnet', 'haiku'].includes(model)) && (
-            <Alert variant="destructive">
-              <AlertDescription>This profile isn't signed in to Claude. <Link to="/claude/setup" className="underline" onClick={onClose}>Sign in or configure CLI keys</Link>.</AlertDescription>
-            </Alert>
+
+          {openIn === 'chat' && (
+            <Field>
+              <FieldLabel htmlFor="ns-prompt">First message (optional)</FieldLabel>
+              <Textarea
+                id="ns-prompt"
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                rows={3}
+                placeholder={`Ask ${selectedCliMeta.label} to build, debug, deploy to Hosting, or leave blank to open an empty session…`}
+                className="min-h-20 text-base md:text-sm"
+              />
+            </Field>
           )}
-          <Field>
-            <FieldLabel htmlFor="ns-model">AI CLI &amp; Model</FieldLabel>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button id="ns-model" type="button" variant="outline" className="h-10 w-full justify-between font-normal">
-                  <span className="truncate">{customModel ? 'Another model' : modelLabel(models, model)}</span><ChevronDown className="text-muted-foreground" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] w-(--radix-dropdown-menu-trigger-width) max-w-none overflow-y-auto">
-                <ModelChoices models={models} value={customModel ? null : model || null} onChange={(v) => { setCustomModel(false); setModel(v ?? '') }} />
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => { setCustomModel(true); setModel('') }}>Another model (enter its ID)</DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-            {customModel && (
-              <Input aria-label="Model ID" className="h-10 font-mono" placeholder="claude-opus-4-1" value={model} onChange={(e) => setModel(e.target.value)}
-                spellCheck={false} autoCapitalize="none" autoFocus />
-            )}
-            <FieldDescription>
-              {customModel ? 'Any model ID Claude Code accepts, for a specific version.'
-                : pickedModel?.description ? `${pickedModel.description}${pickedModel.value && !pickedModel.value.startsWith('claude-') && !isDefaultModel(pickedModel.value) ? '. Always its newest version.' : ''}`
-                : 'Change it any time in the session.'}
-            </FieldDescription>
-          </Field>
+
           <Choice id="ns-perm" label="Permissions" value={perm} onChange={(v) => setPerm(v as PermissionMode)}
             options={PERMISSION_MODES.slice(0, 4).map((p) => ({ value: p.value, label: p.label }))}
             description={PERMISSION_MODES.find((p) => p.value === perm)?.hint} />
@@ -272,10 +354,10 @@ export function NewSession({ open, onClose, initialPrompt = '', initialCwd, init
             description={`${sharing === 'private' ? 'Only you see it.' : sharing === 'shared' ? 'Everyone can watch; you choose who else can send.' : 'Everyone can watch and send messages.'}${project && !sharingPick ? ' The project\'s default.' : ''} Change it any time in the session.`} />
           <Choice id="ns-open" label="Open in" value={openIn} onChange={(v) => setOpenIn(v as 'chat' | 'cli')}
             options={[{ value: 'chat', label: 'Chat' }, { value: 'cli', label: 'CLI' }]}
-            description={openIn === 'cli' ? 'The real Claude Code terminal. You can switch to Chat any time.' : 'A chat view of Claude Code. You can switch to the CLI any time.'} />
+            description={openIn === 'cli' ? `The live ${selectedCliMeta.label} terminal. You can switch to Chat any time.` : `A chat view of ${selectedCliMeta.label}. You can switch to the CLI any time.`} />
           <ErrorAlert error={create.error} />
           <Button type="submit" size="lg" className="h-10" disabled={create.isPending || (customModel && !model.trim())}>
-            {create.isPending && <Spinner />}Start session
+            {create.isPending && <Spinner />}Start session ({selectedCliMeta.label})
           </Button>
         </FieldGroup>
       </form>

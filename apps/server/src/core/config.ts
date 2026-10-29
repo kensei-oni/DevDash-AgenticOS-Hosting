@@ -53,7 +53,7 @@ export function loadConfig(): Config {
     masterKey,
     trustCfIp: process.env.DEVDASH_TRUST_CF_IP === '1',
     runDir: process.env.DEVDASH_RUN_DIR ?? (existsSync('/run/devdash') ? '/run/devdash' : ''),
-    projectsRoot: process.env.DEVDASH_PROJECTS_ROOT || '/srv/devdash',
+    projectsRoot: (process.env.DEVDASH_PROJECTS_ROOT || (existsSync('/srv/devdash') ? '/srv/devdash' : resolve(dataDir, 'workspace'))).replace(/\\/g, '/'),
     servicesPort: Number(process.env.DEVDASH_SERVICES_PORT || 8443),
     version: pkg.version,
     repo: repo(process.env.DEVDASH_REPO || 'abdvlrqhman/DevDash-AgenticOS'),

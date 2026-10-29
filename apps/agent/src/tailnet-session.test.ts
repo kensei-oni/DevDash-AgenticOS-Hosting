@@ -8,7 +8,10 @@ const listen = (server: ReturnType<typeof createServer>) =>
 
 /** A minimal no-auth SOCKS5 proxy that CONNECTs to the requested host:port and pipes both ways. */
 function fakeSocks() {
+  const sockets = new Set<Socket>()
   const server = createServer((c) => {
+    sockets.add(c)
+    c.on('close', () => sockets.delete(c))
     let stage = 0
     let buf = Buffer.alloc(0)
     c.on('data', (chunk) => {
@@ -29,6 +32,8 @@ function fakeSocks() {
         const rest = buf.subarray(7 + len)
         stage = 2
         const up = createConnection({ host, port }, () => {
+          sockets.add(up)
+          up.on('close', () => sockets.delete(up))
           c.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])) // success, bound 0.0.0.0:0
           if (rest.length) up.write(rest)
           c.pipe(up)
@@ -39,12 +44,17 @@ function fakeSocks() {
     })
     c.on('error', () => c.destroy())
   })
+  const origClose = server.close.bind(server)
+  server.close = ((cb?: (err?: Error) => void) => {
+    for (const s of sockets) s.destroy()
+    return origClose(cb)
+  }) as typeof server.close
   return server
 }
 
 test('socksConnect reaches a target through a SOCKS5 proxy and round-trips data', async () => {
   // echo target
-  const target = createServer((s: Socket) => s.pipe(s))
+  const target = createServer((s: Socket) => { s.on('error', () => {}); s.pipe(s) })
   const targetPort = await listen(target)
   const socks = fakeSocks()
   const socksPort = await listen(socks)
@@ -61,7 +71,7 @@ test('socksConnect reaches a target through a SOCKS5 proxy and round-trips data'
 })
 
 test('startForwarder exposes a localhost port that tunnels through the proxy to the target', async () => {
-  const target = createServer((s: Socket) => s.write('hello from tailnet'))
+  const target = createServer((s: Socket) => { s.on('error', () => {}); s.end('hello from tailnet') })
   const targetPort = await listen(target)
   const socks = fakeSocks()
   const socksPort = await listen(socks)

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { busy, DISK_SPARE, MAX_BYTES, ops, roomFor } from './project.ts'
@@ -91,8 +91,8 @@ test('a single top-level folder is flattened so the files sit directly in the pr
 test('finalizing refuses to overwrite a folder that already has files', async () => {
   const root = newRoot()
   const dest = `${root}/projects/taken`
-  execFileSync('mkdir', ['-p', dest])
-  execFileSync('touch', [join(dest, 'keep.me')])
+  mkdirSync(dest, { recursive: true })
+  writeFileSync(join(dest, 'keep.me'), '')
   const zip = makeZip([{ name: 'x.txt', data: Buffer.from('x') }])
   await assert.rejects(importZip(root, 'taken', zip), /already exists/)
   assert.ok(existsSync(join(dest, 'keep.me')), 'the existing folder is untouched')

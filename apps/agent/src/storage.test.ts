@@ -41,7 +41,9 @@ test('configure writes the rclone config privately and refuses values that could
   process.env.RCLONE_CONFIG = join(dir, 'sub', 'rclone.conf')
   try {
     assert.equal(await configure(s), true)
-    assert.equal(statSync(process.env.RCLONE_CONFIG).mode & 0o777, 0o600)
+    if (process.platform !== 'win32') {
+      assert.equal(statSync(process.env.RCLONE_CONFIG).mode & 0o777, 0o600)
+    }
     assert.equal(await configure(s), false) // nothing to change
     writeFileSync(process.env.RCLONE_CONFIG, `${OWN}\n${readFileSync(process.env.RCLONE_CONFIG, 'utf8')}`)
     await assert.rejects(() => configure({ ...s, folderId: 'F1\n[evil]' }), /invalid/)

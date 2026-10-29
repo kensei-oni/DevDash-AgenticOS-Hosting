@@ -249,7 +249,7 @@ export const ATTACHMENTS_MS = 14 * 24 * 60 * 60_000
  * big uploads whose message was never sent: a folder untouched for two weeks goes, and an emptied session folder too.
  */
 async function sweepAttachments(now: number, out: Result): Promise<void> {
-  const root = join(homedir(), '.cache', 'devdash', 'uploads')
+  const root = join(process.env.HOME || homedir(), '.cache', 'devdash', 'uploads')
   let sessions: string[]
   try {
     sessions = await readdir(root)

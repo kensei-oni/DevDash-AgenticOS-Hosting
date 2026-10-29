@@ -1,11 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ops } from './files.ts'
 
 test('find: files with a name under the given folders, newest first, skipping dependencies and git', async () => {
-  const root = mkdtempSync('/tmp/dd-find-')
+  mkdirSync('/tmp', { recursive: true })
+  const root = realpathSync(mkdtempSync('/tmp/dd-find-'))
   try {
     const put = (rel: string, at: number) => {
       mkdirSync(join(root, rel, '..'), { recursive: true })

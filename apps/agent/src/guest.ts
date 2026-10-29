@@ -51,16 +51,20 @@ export function realPath(p: string): string {
 }
 
 const inside = (p: string, roots: string[]) => {
-  const r = realPath(p)
-  return roots.some((root) => r === root || r.startsWith(`${root}/`))
+  const r = realPath(p).replace(/\\/g, '/')
+  return roots.some((rawRoot) => {
+    const root = realPath(rawRoot).replace(/\\/g, '/')
+    return r === root || r.startsWith(`${root}/`)
+  })
 }
 
 /** The folder part of a glob before its first wildcard: `/home/x/**\/*.key` → `/home/x`, `../a/*.ts` → `../a`, `*.ts` → `.`. */
 const globFolder = (pattern: string) => {
-  const parts = pattern.split('/')
+  const norm = pattern.replace(/\\/g, '/')
+  const parts = norm.split('/')
   const wild = parts.findIndex((s) => /[*?[{]/.test(s))
   const fixed = parts.slice(0, wild < 0 ? parts.length - 1 : wild)
-  return fixed.join('/') || (pattern.startsWith('/') ? '/' : '.')
+  return fixed.join('/') || (norm.startsWith('/') ? '/' : '.')
 }
 
 export type GuestContext = {
@@ -122,9 +126,10 @@ export function commandMay(cmd: string, caps: Set<string>, o: GuestContext): boo
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 /** The owner's home and credentials: `~`, $HOME, /home, /root, their sockets, the usual key and token files. */
 function privateRef(line: string, home: string): boolean {
+  const normHome = home.replace(/\\/g, '/')
   return /(^|[\s'"=:(<>|;&])~(?=$|[\s/'"):;|&<>])/.test(line)
     || /\$\{?HOME\b/.test(line)
-    || new RegExp(`(^|[^\\w.-])(${esc(home)}|/home|/root|/run/user)(?=$|[/\\s'":;|&)])`).test(line)
+    || new RegExp(`(^|[^\\w.-])(${esc(home)}|${esc(normHome)}|/home|/root|/run/user)(?=$|[\\\\/\\s'":;|&)])`).test(line)
     || /\.ssh\b|\bid_(rsa|ed25519|ecdsa)\b|\.config\/(gh|rclone|gcloud)\b|rclone\.conf|\.git-credentials|\.netrc|\.aws\/|\.kube\/|\.docker\/config|\.credentials\.json|\.claude\.json|\/proc\/[^\s/]+\/environ|\b(GH|GITHUB)_TOKEN\b/.test(line)
 }
 

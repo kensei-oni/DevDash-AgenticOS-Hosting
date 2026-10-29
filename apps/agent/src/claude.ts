@@ -15,7 +15,17 @@ import { getPorts } from './tailscale.ts'
 import { startForwarder, writeSshHelper } from './tailnet-session.ts'
 import * as storage from './storage.ts'
 import { guestMay } from './guest.ts'
-import { cliEnv, cliTerminalLaunch, extraCliModels, modelSessionEnv, parseCliModel, readCliConfig } from './ai-clis.ts'
+import {
+  canUseDirectCliRunner,
+  cliEnv,
+  cliTerminalLaunch,
+  extraCliModels,
+  hasAnyConfiguredCliKey,
+  modelSessionEnv,
+  parseCliModel,
+  readCliConfig,
+  runDirectCliTurn,
+} from './ai-clis.ts'
 
 export const PLUGIN_DIR = fileURLToPath(new URL('../../../packages/claude-plugin', import.meta.url))
 export const PROFILE_RE = /^[a-z0-9][a-z0-9-]{0,20}$/
@@ -443,6 +453,35 @@ function endGuest(c: Chat) {
  */
 export const send = (l: Launch, content: unknown[], uuid: string, guest: Guest | null = null) => serial(l.id, async () => {
   if (await hasSession(cliName(l.id))) throw new Error('This session is open in the CLI. Switch to Chat to send from here.')
+  if (!chats.has(l.id)) {
+    const parsed = parseCliModel(l.model)
+    const cfg = readCliConfig()
+    const isDirectOnlyCli =
+      parsed.cli === 'codex' ||
+      parsed.cli === 'antigravity' ||
+      (parsed.cli === 'opencode' && !cfg.OPENROUTER_API_KEY)
+    const claudeOk = isDirectOnlyCli ? false : (await authStatus(l.profile)).loggedIn
+    if (isDirectOnlyCli || (!claudeOk && (await canUseDirectCliRunner(l.model, false)))) {
+      validate(l)
+      emit({ ev: 'claude.status', id: l.id, status: 'working' })
+      try {
+        await runDirectCliTurn({
+          sessionId: l.id,
+          profileDir: profileDir(l.profile),
+          cwd: l.cwd,
+          model: l.model,
+          systemPrompt: systemAppend(l),
+          userUuid: uuid,
+          userContent: content,
+          emit,
+        })
+        emit({ ev: 'claude.status', id: l.id, status: 'idle' })
+      } catch (err) {
+        emit({ ev: 'claude.status', id: l.id, status: 'error', detail: (err as Error).message.slice(0, 500) })
+      }
+      return
+    }
+  }
   const c = chats.get(l.id) ?? (await startChat(l))
   c.launch = { ...c.launch, guestCaps: l.guestCaps ?? [] }
   if (guest) c.guest = guest
@@ -927,11 +966,21 @@ async function authStatus(name: string) {
   if (name === 'openrouter' && extra.OPENROUTER_API_KEY) {
     return { name, loggedIn: true, authMethod: 'apiKey', email: 'OpenRouter API', plan: extra.ANTHROPIC_MODEL ?? 'openrouter' }
   }
+  const anyKey = hasAnyConfiguredCliKey()
   try {
     const { stdout } = await run(CLAUDE_BIN, ['auth', 'status', '--json'], { env: { ...process.env, ...profileEnv(name) }, timeout: 20_000 })
     const s = JSON.parse(stdout) as { loggedIn?: boolean; authMethod?: string; email?: string; subscriptionType?: string }
-    return { name, loggedIn: !!s.loggedIn, authMethod: s.authMethod ?? null, email: s.email ?? null, plan: s.subscriptionType ?? null }
+    if (s.loggedIn) {
+      return { name, loggedIn: true, authMethod: s.authMethod ?? null, email: s.email ?? null, plan: s.subscriptionType ?? null }
+    }
+    if (anyKey.ready) {
+      return { name, loggedIn: true, authMethod: 'apiKey', email: anyKey.provider, plan: 'API Key' }
+    }
+    return { name, loggedIn: false, authMethod: s.authMethod ?? null, email: s.email ?? null, plan: s.subscriptionType ?? null }
   } catch {
+    if (anyKey.ready) {
+      return { name, loggedIn: true, authMethod: 'apiKey', email: anyKey.provider, plan: 'API Key' }
+    }
     return { name, loggedIn: false, authMethod: null, email: null, plan: null }
   }
 }
@@ -998,6 +1047,28 @@ export async function usage(profile: string) {
  */
 export async function complete(profile: string, prompt: string, o: { model?: string; system?: string } = {}) {
   if (!PROFILE_RE.test(profile)) throw new Error('invalid profile')
+  const parsed = parseCliModel(o.model)
+  const cfg = readCliConfig()
+  const isDirectOnly = parsed.cli === 'codex' || parsed.cli === 'antigravity'
+  const claudeOk = isDirectOnly ? false : (await authStatus(profile)).loggedIn
+  if (isDirectOnly || (!claudeOk && (await canUseDirectCliRunner(o.model, false))) || (!cfg.ANTHROPIC_API_KEY && (cfg.OPENROUTER_API_KEY || cfg.OPENAI_API_KEY || cfg.GEMINI_API_KEY || cfg.XAI_API_KEY))) {
+    let captured = ''
+    await runDirectCliTurn({
+      sessionId: randomUUID(),
+      profileDir: profileDir(profile),
+      cwd: homedir(),
+      model: o.model,
+      systemPrompt: o.system ?? 'You are a helpful coding & DevOps assistant inside agOS.',
+      userUuid: randomUUID(),
+      userContent: [{ type: 'text', text: prompt }],
+      emit: (ev) => {
+        if (ev.ev === 'claude.msg' && (ev.msg as { type?: string; result?: string })?.type === 'result') {
+          captured = String((ev.msg as { result?: string }).result ?? '')
+        }
+      },
+    })
+    if (captured) return captured
+  }
   await requireLogin(profile, o.model)
   const { env: cliModelEnv, sdkModel } = modelSessionEnv(o.model)
   const inbox = new Inbox()

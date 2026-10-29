@@ -44,8 +44,10 @@ export function socksConnect(socksPort: number, host: string, port: number): Pro
         s.removeListener('data', onData)
         s.removeListener('error', fail)
         const rest = buf.subarray(need)
-        if (rest.length) s.unshift(rest)
         resolve(s)
+        if (rest.length) {
+          queueMicrotask(() => s.emit('data', rest))
+        }
       }
     }
     s.on('data', onData)

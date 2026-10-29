@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite'
 const MAX_ROWS = 200
 
 export function query(path: unknown, sql: unknown) {
-  if (typeof path !== 'string' || !path.startsWith('/')) throw new Error('Use a full path to the database file.')
+  if (typeof path !== 'string' || (!path.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(path))) throw new Error('Use a full path to the database file.')
   if (typeof sql !== 'string' || !sql.trim()) throw new Error('missing sql')
   const db = new DatabaseSync(path, { readOnly: true })
   try {

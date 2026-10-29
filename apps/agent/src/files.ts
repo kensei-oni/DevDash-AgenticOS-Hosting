@@ -8,18 +8,19 @@ import { send } from './tmux.ts'
 // Files as this member: their home, the shared project checkouts, the sessions' worktrees and the team's shared folder,
 // plus /tmp, where Claude often leaves screenshots and builds. Linux permissions apply on top; paths are resolved
 // (symlinks included) and must stay inside one of these.
-const SRV = process.env.DEVDASH_PROJECTS_ROOT || '/srv/devdash'
+const srvDir = () => (process.env.DEVDASH_PROJECTS_ROOT || '/srv/devdash').replace(/\\/g, '/')
 const norm = (x: string) => x.replace(/\\/g, '/')
 const isFullPath = (p: unknown): p is string => typeof p === 'string' && (p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p))
 export const roots = () => [
   { id: 'home', label: 'Home', path: norm(homedir()) },
-  { id: 'projects', label: 'Projects', path: `${SRV}/projects` },
-  { id: 'worktrees', label: 'Worktrees', path: `${SRV}/worktrees` },
-  { id: 'shared', label: 'Shared', path: `${SRV}/files` },
+  { id: 'projects', label: 'Projects', path: `${srvDir()}/projects` },
+  { id: 'worktrees', label: 'Worktrees', path: `${srvDir()}/worktrees` },
+  { id: 'shared', label: 'Shared', path: `${srvDir()}/files` },
 ]
 const inside = (p: string) => {
   const np = norm(p)
-  return [...roots().map((r) => norm(r.path)), '/tmp'].some((r) => np === r || np.startsWith(`${r}/`))
+  const tmp = norm(resolve('/tmp'))
+  return [...roots().map((r) => norm(r.path)), '/tmp', tmp].some((r) => np === r || np.startsWith(`${r}/`))
 }
 
 const FIND_SKIP = new Set(['node_modules', '.git', '.godot', '.gradle', '.cache', '.venv', 'venv', '__pycache__', '.tools', '.next', 'target', '.pub-cache', '.dart_tool'])

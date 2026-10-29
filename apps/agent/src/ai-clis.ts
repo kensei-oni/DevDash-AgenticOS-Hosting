@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -478,4 +479,210 @@ export function modelSessionEnv(model: string | null | undefined): { env: Record
 
   return { env: base, sdkModel: subModel ?? undefined }
 }
+
+/**
+ * Checks whether any external CLI or provider API key is configured, so the session UI and auth checks know
+ * what capabilities are available even if the user hasn't signed into a Claude Pro/Max subscription.
+ */
+export function hasAnyConfiguredCliKey(): { ready: boolean; provider: string | null } {
+  const cfg = readCliConfig()
+  if (cfg.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY) return { ready: true, provider: 'Anthropic API Key' }
+  if (cfg.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY) return { ready: true, provider: 'OpenRouter API Key' }
+  if (cfg.OPENAI_API_KEY || process.env.OPENAI_API_KEY) return { ready: true, provider: 'OpenAI API Key (Codex)' }
+  if (cfg.GEMINI_API_KEY || process.env.GEMINI_API_KEY) return { ready: true, provider: 'Gemini API Key (Antigravity)' }
+  if (cfg.XAI_API_KEY || process.env.XAI_API_KEY) return { ready: true, provider: 'xAI API Key (Grok)' }
+  return { ready: false, provider: null }
+}
+
+/**
+ * Fallback/Direct Chat Runner for OpenCode CLI, Codex CLI, Antigravity CLI, Grok CLI, and OpenRouter CLI
+ * when Claude Code SDK is not logged in or when using non-Anthropic provider APIs/CLIs directly in Chat mode.
+ * Writes standard transcript `.jsonl` lines so history, titles, and reloads work identically to Claude Code.
+ */
+export async function canUseDirectCliRunner(model: string | null | undefined, claudeLoggedIn: boolean): Promise<boolean> {
+  const { cli } = parseCliModel(model)
+  const cfg = readCliConfig()
+  if (cli === 'codex') return Boolean(cfg.OPENAI_API_KEY || process.env.OPENAI_API_KEY || (await detectBin(['codex'])).installed)
+  if (cli === 'antigravity') return Boolean(cfg.GEMINI_API_KEY || process.env.GEMINI_API_KEY || (await detectBin(['agy', 'antigravity', 'gemini'])).installed)
+  if (cli === 'opencode') return Boolean((await detectBin(['opencode'])).installed || cfg.OPENROUTER_API_KEY || cfg.OPENAI_API_KEY)
+  if (cli === 'grok' && !claudeLoggedIn) return Boolean(cfg.XAI_API_KEY || process.env.XAI_API_KEY || (await detectBin(['grok'])).installed)
+  if (cli === 'openrouter' && !claudeLoggedIn) return Boolean(cfg.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY)
+  if (!claudeLoggedIn) {
+    return Boolean(cfg.OPENROUTER_API_KEY || cfg.OPENAI_API_KEY || cfg.GEMINI_API_KEY || cfg.XAI_API_KEY)
+  }
+  return false
+}
+
+export async function runDirectCliTurn(opts: {
+  sessionId: string
+  profileDir: string
+  cwd: string
+  model: string | null | undefined
+  systemPrompt: string
+  userUuid: string
+  userContent: unknown[]
+  emit: (ev: Record<string, unknown>) => void
+}): Promise<void> {
+  const { sessionId, profileDir, cwd, model, systemPrompt, userUuid, userContent, emit } = opts
+  const { cli, subModel } = parseCliModel(model)
+  const cfg = readCliConfig()
+  const env = { ...process.env, ...cliEnv(cli === 'openrouter' ? 'openrouter' : undefined) }
+
+  // Ensure transcript directory exists & append user prompt
+  const root = join(profileDir, 'projects')
+  const escapedDir = join(root, cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+  mkdirSync(escapedDir, { recursive: true })
+  const transcriptPath = join(escapedDir, `${sessionId}.jsonl`)
+
+  const promptText = userContent
+    .map((b) => (typeof b === 'object' && b && 'type' in b && (b as { type: string }).type === 'text' ? String((b as { text?: string }).text ?? '') : ''))
+    .filter(Boolean)
+    .join('\n')
+    .trim()
+
+  const nowIso = new Date().toISOString()
+  const userLine = {
+    type: 'user',
+    uuid: userUuid,
+    parent_tool_use_id: null,
+    timestamp: nowIso,
+    cwd,
+    message: { role: 'user', content: userContent },
+  }
+  appendFileSync(transcriptPath, JSON.stringify(userLine) + '\n')
+
+  let replyText = ''
+
+  // 1. Try installed native CLI in non-interactive mode first for opencode / codex / antigravity / grok if no direct API call is preferred
+  try {
+    if (cli === 'opencode') {
+      const oc = await detectBin(['opencode'])
+      if (oc.installed) {
+        const args = ['run', ...(subModel ? ['--model', subModel] : []), promptText]
+        const { stdout, stderr } = await run(oc.bin, args, { cwd, env, timeout: 180_000 })
+        replyText = (stdout || stderr).trim()
+      }
+    } else if (cli === 'codex' && !cfg.OPENAI_API_KEY && !process.env.OPENAI_API_KEY) {
+      const cx = await detectBin(['codex'])
+      if (cx.installed) {
+        const { stdout, stderr } = await run(cx.bin, ['exec', promptText], { cwd, env, timeout: 180_000 })
+        replyText = (stdout || stderr).trim()
+      }
+    } else if (cli === 'antigravity' && !cfg.GEMINI_API_KEY && !process.env.GEMINI_API_KEY) {
+      const ag = await detectBin(['agy', 'antigravity', 'gemini'])
+      if (ag.installed) {
+        const { stdout, stderr } = await run(ag.bin, ['-p', promptText], { cwd, env, timeout: 180_000 })
+        replyText = (stdout || stderr).trim()
+      }
+    } else if (cli === 'grok' && !cfg.XAI_API_KEY && !process.env.XAI_API_KEY) {
+      const gk = await detectBin(['grok'])
+      if (gk.installed) {
+        const { stdout, stderr } = await run(gk.bin, ['-p', promptText], { cwd, env, timeout: 180_000 })
+        replyText = (stdout || stderr).trim()
+      }
+    }
+  } catch (err) {
+    replyText = `CLI execution note: ${(err as Error).message}`
+  }
+
+  // 2. If replyText is still empty, call the configured provider API directly (OpenRouter / OpenAI / xAI / Gemini)
+  if (!replyText) {
+    let apiUrl = ''
+    let apiKey = ''
+    let apiModel = ''
+
+    if (cli === 'codex' && (cfg.OPENAI_API_KEY || process.env.OPENAI_API_KEY)) {
+      apiUrl = 'https://api.openai.com/v1/chat/completions'
+      apiKey = (cfg.OPENAI_API_KEY || process.env.OPENAI_API_KEY)!
+      apiModel = subModel || 'gpt-4.1'
+    } else if (cli === 'grok' && (cfg.XAI_API_KEY || process.env.XAI_API_KEY)) {
+      apiUrl = 'https://api.x.ai/v1/chat/completions'
+      apiKey = (cfg.XAI_API_KEY || process.env.XAI_API_KEY)!
+      apiModel = subModel || 'grok-4'
+    } else if (cli === 'antigravity' && (cfg.GEMINI_API_KEY || process.env.GEMINI_API_KEY)) {
+      apiUrl = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
+      apiKey = (cfg.GEMINI_API_KEY || process.env.GEMINI_API_KEY)!
+      apiModel = subModel || 'gemini-2.5-pro'
+    } else if (cfg.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY) {
+      apiUrl = 'https://openrouter.ai/api/v1/chat/completions'
+      apiKey = (cfg.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY)!
+      apiModel =
+        subModel ||
+        (cli === 'codex'
+          ? 'openai/gpt-4.1'
+          : cli === 'antigravity'
+            ? 'google/gemini-2.5-pro'
+            : cli === 'grok'
+              ? 'x-ai/grok-4'
+              : cfg.OPENROUTER_MODEL || 'anthropic/claude-sonnet-4')
+    } else if (cfg.OPENAI_API_KEY || process.env.OPENAI_API_KEY) {
+      apiUrl = 'https://api.openai.com/v1/chat/completions'
+      apiKey = (cfg.OPENAI_API_KEY || process.env.OPENAI_API_KEY)!
+      apiModel = 'gpt-4.1'
+    } else if (cfg.GEMINI_API_KEY || process.env.GEMINI_API_KEY) {
+      apiUrl = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'
+      apiKey = (cfg.GEMINI_API_KEY || process.env.GEMINI_API_KEY)!
+      apiModel = 'gemini-2.5-pro'
+    } else if (cfg.XAI_API_KEY || process.env.XAI_API_KEY) {
+      apiUrl = 'https://api.x.ai/v1/chat/completions'
+      apiKey = (cfg.XAI_API_KEY || process.env.XAI_API_KEY)!
+      apiModel = 'grok-4'
+    }
+
+    if (apiUrl && apiKey) {
+      const res = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: apiModel,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: promptText },
+          ],
+        }),
+      })
+      const data = (await res.json()) as { choices?: { message?: { content?: string } }[]; error?: { message?: string } }
+      if (!res.ok) {
+        throw new Error(data.error?.message || `Provider API returned HTTP ${res.status}`)
+      }
+      replyText = data.choices?.[0]?.message?.content?.trim() || '(No response content)'
+    } else {
+      throw new Error(
+        `No API key or binary configured for ${cli.toUpperCase()} CLI. Open Setup (/claude/setup) to save your API key or install the CLI.`
+      )
+    }
+  }
+
+  const assistantUuid = randomUUID()
+  const assistantMsg = {
+    type: 'assistant',
+    uuid: assistantUuid,
+    parent_tool_use_id: null,
+    timestamp: new Date().toISOString(),
+    cwd,
+    message: {
+      role: 'assistant',
+      model: model || cli,
+      content: [{ type: 'text', text: replyText }],
+    },
+  }
+  appendFileSync(transcriptPath, JSON.stringify(assistantMsg) + '\n')
+  emit({ ev: 'claude.msg', id: sessionId, msg: assistantMsg })
+  emit({
+    ev: 'claude.msg',
+    id: sessionId,
+    msg: {
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      result: replyText,
+      session_id: sessionId,
+      uuid: randomUUID(),
+    },
+  })
+}
+
 
