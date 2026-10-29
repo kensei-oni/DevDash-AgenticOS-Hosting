@@ -101,6 +101,9 @@ const service = createRoute({ getParentRoute: () => app, path: '/services/$name'
 // A service inside the app, framed under the top bar (the Service page's "View", and pinned services).
 const serviceView = createRoute({ getParentRoute: () => app, path: '/services/$name/view', component: lazyRouteComponent(() => import('./features/services/ServiceViewPage'), 'ServiceViewPage') })
 // Claude is master-detail on wide screens: ClaudeLayout keeps the session list beside whatever is open.
+const hosting = createRoute({ getParentRoute: () => app, path: '/hosting', component: lazy(() => import('./features/hosting/HostingPage'), 'HostingPage') })
+const hostedApp = createRoute({ getParentRoute: () => app, path: '/hosting/$kind/$id', component: lazy(() => import('./features/hosting/HostingPage'), 'HostedAppRoute') })
+const monitorRoute = createRoute({ getParentRoute: () => app, path: '/monitor', component: lazy(() => import('./features/monitor/MonitorPage'), 'MonitorPage') })
 const claude = createRoute({ getParentRoute: () => app, path: '/claude', component: ClaudeLayout })
 const claudeIndex = createRoute({ getParentRoute: () => claude, path: '/', component: ClaudeIndex })
 const claudeSetup = createRoute({ getParentRoute: () => claude, path: '/setup', component: lazy(() => import('./features/claude/SetupPage'), 'SetupPage') })
@@ -111,7 +114,7 @@ const claudeSession = createRoute({
 })
 
 const router = createRouter({
-  routeTree: root.addChildren([login, invite, storageCallback, app.addChildren([home, claude.addChildren([claudeIndex, claudeSetup, claudeSession]), terminal, files, vaultRoute, network, storage, browserRoute, serverRoute, services, service, serviceView, projects, project, teamRole, teamThreads, teamThread, approvals, approvalsProject, buildRun, tasks, task, tools, tool, notes, note, members, account, more])]),
+  routeTree: root.addChildren([login, invite, storageCallback, app.addChildren([home, claude.addChildren([claudeIndex, claudeSetup, claudeSession]), terminal, files, vaultRoute, network, storage, browserRoute, serverRoute, services, service, serviceView, hosting, hostedApp, monitorRoute, projects, project, teamRole, teamThreads, teamThread, approvals, approvalsProject, buildRun, tasks, task, tools, tool, notes, note, members, account, more])]),
   context: { queryClient },
   defaultPreload: 'intent',
 })

@@ -38,3 +38,8 @@ Thumbs.db
 
 # Local agent worktrees (per-session, never committed)
 .claude/
+.next/
+apps/hosting/.next/
+apps/hosting/**/.next/
+apps/hosting/**/dist/
+

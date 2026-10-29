@@ -11,8 +11,9 @@ export type AgentEvent = { ev: string; id?: string; [k: string]: unknown }
  */
 export function agentsService({ runDir }: { runDir: string }) {
   const path = (username: string) => {
-    if (!runDir) throw new AppError(409, 'no_host', 'This needs DevDash running on its Linux server.')
-    return join(runDir, `agent-${username}.sock`)
+    if (runDir) return join(runDir, `agent-${username}.sock`)
+    if (process.env.DEVDASH_LOCAL_AGENT_SOCKET) return process.env.DEVDASH_LOCAL_AGENT_SOCKET
+    throw new AppError(409, 'no_host', 'This needs DevDash running on its Linux server.')
   }
   const handlers = new Set<(username: string, ev: AgentEvent) => void>()
   // Calls from a member's own processes (e.g. the `devdash service` command), relayed by their agent.
@@ -45,7 +46,7 @@ export function agentsService({ runDir }: { runDir: string }) {
 
   /** Keeps an event connection to this member's agent, reconnecting with backoff. */
   function watch(username: string) {
-    if (!runDir || watched.has(username)) return
+    if ((!runDir && !process.env.DEVDASH_LOCAL_AGENT_SOCKET) || watched.has(username)) return
     const w: { sock?: Socket; stop: boolean } = { stop: false }
     watched.set(username, w)
     let delay = 1000

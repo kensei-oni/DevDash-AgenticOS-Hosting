@@ -7,7 +7,13 @@ import type { BrowserService } from './service.ts'
 
 const WATCH_COOKIE = 'dd_watch'
 
-export function browserRoutes(browser: BrowserService, mw: ReturnType<typeof authMiddleware>) {
+export type AskBrowserClaude = (user: AuthEnv['Variables']['user'], prompt: string) => Promise<{ sessionId: string }>
+
+export function browserRoutes(
+  browser: BrowserService,
+  mw: ReturnType<typeof authMiddleware>,
+  askClaude?: AskBrowserClaude,
+) {
   return new Hono<AuthEnv>()
     // Caddy asks this before every /browser/ request (forward_auth): a signed-in member, or a guest with a live invite.
     .get('/check', (c) => {
@@ -25,6 +31,25 @@ export function browserRoutes(browser: BrowserService, mw: ReturnType<typeof aut
       console.log(`browser stopped by ${c.get('user').username}`)
       await browser.stop()
       return c.json({ ok: true })
+    })
+    // Real-time CDP controls (also exposed to Claude Code via browser_* MCP tools)
+    .post('/navigate', json(z.object({ url: z.string().min(1).max(2000) })), async (c) =>
+      c.json(await browser.navigate(c.get('user'), c.req.valid('json').url)))
+    .post('/click', json(z.object({ selector: z.string().min(1).max(500) })), async (c) =>
+      c.json(await browser.click(c.get('user'), c.req.valid('json').selector)))
+    .post('/type', json(z.object({ selector: z.string().min(1).max(500), text: z.string().max(10_000), submit: z.boolean().optional() })), async (c) => {
+      const b = c.req.valid('json')
+      return c.json(await browser.type(c.get('user'), b.selector, b.text, b.submit))
+    })
+    .post('/press', json(z.object({ key: z.string().min(1).max(60) })), async (c) =>
+      c.json(await browser.press(c.get('user'), c.req.valid('json').key)))
+    .get('/snapshot', async (c) => c.json(await browser.snapshot(c.get('user'))))
+    .get('/screenshot', async (c) => c.json(await browser.screenshot(c.get('user'))))
+    .post('/eval', json(z.object({ expression: z.string().min(1).max(20_000) })), async (c) =>
+      c.json(await browser.evaluate(c.get('user'), c.req.valid('json').expression)))
+    .post('/ask', json(z.object({ prompt: z.string().min(1).max(10_000) })), async (c) => {
+      if (!askClaude) throw new Error('Claude integration is not wired.')
+      return c.json(await askClaude(c.get('user'), c.req.valid('json').prompt))
     })
     .get('/invites', (c) => c.json({ invites: browser.invites() }))
     .post('/invites', json(z.object({ label: z.string().trim().min(1).max(60), hours: z.number().int().min(1).max(24 * 30), canControl: z.boolean().default(false) })),

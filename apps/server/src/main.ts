@@ -7,6 +7,15 @@ import { wsRouter } from './core/ws.ts'
 import { registerSockets } from './sockets.ts'
 
 const config = loadConfig()
+if (!config.runDir) {
+  const sock = process.platform === 'win32'
+    ? `\\\\.\\pipe\\devdash-agent-${process.pid}`
+    : `/tmp/devdash-agent-${process.pid}.sock`
+  process.env.DEVDASH_LOCAL_AGENT_SOCKET = sock
+  process.env.DEVDASH_AGENT_SOCKET = sock
+  process.env.USER ??= process.env.USERNAME ?? 'local'
+  await import('../../agent/src/main.ts')
+}
 const db = openDb(join(config.dataDir, 'devdash.db'))
 const { app, auth, provisioning, terms, agents, claude, services, hub, previews } = createApp({ db, config })
 
@@ -16,7 +25,7 @@ const server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: config.por
 registerSockets(wsRouter(server as import('node:http').Server, { auth, origin: config.origin, other: previews.upgrade }), { hub, agents, terms, claude, services })
 setInterval(() => auth.cleanup(), 3_600_000).unref()
 // Provision every member (each success starts watching their agent), then let agents pick up new code once idle.
-void provisioning.reconcileAll().then(() => agents.upgradeAll(provisioning.usernames()))
+void provisioning.reconcileAll().then(() => { if (config.runDir) return agents.upgradeAll(provisioning.usernames()) })
 
 for (const sig of ['SIGTERM', 'SIGINT'] as const) {
   process.on(sig, () => {

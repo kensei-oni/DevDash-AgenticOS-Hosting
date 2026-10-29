@@ -1,0 +1,465 @@
+import { IS_CLOUD } from "@dokploy/server/constants";
+import {
+	apiCreateAi,
+	apiSaveAiCustomProviders,
+	apiUpdateAi,
+	deploySuggestionSchema,
+} from "@dokploy/server/db/schema/ai";
+import {
+	createDomain,
+	createMount,
+	findEnvironmentById,
+} from "@dokploy/server/index";
+import {
+	deleteAiSettings,
+	getAiSettingById,
+	getAiSettingsByOrganizationId,
+	getCustomAiProviders,
+	maskAiApiKey,
+	mergeAiApiKey,
+	resolveAiApiKey,
+	saveAiSettings,
+	saveCustomAiProviders,
+	suggestVariants,
+} from "@dokploy/server/services/ai";
+import { createComposeByTemplate } from "@dokploy/server/services/compose";
+import {
+	addNewService,
+	checkServiceAccess,
+	hasPermission,
+} from "@dokploy/server/services/permission";
+import { findProjectById } from "@dokploy/server/services/project";
+import {
+	getProviderHeaders,
+	getProviderName,
+	type Model,
+	selectAIProvider,
+} from "@dokploy/server/utils/ai/select-ai-provider";
+import { TRPCError } from "@trpc/server";
+import { generateText } from "ai";
+import { z } from "zod";
+import { slugify } from "@/lib/slug";
+import {
+	adminProcedure,
+	createTRPCRouter,
+	withAnyPermission,
+	withPermission,
+} from "@/server/api/trpc";
+import { audit } from "@/server/api/utils/audit";
+import { generatePassword } from "@/templates/utils";
+
+const resolveInputApiKey = (
+	input: { apiKey: string; apiUrl: string; aiId?: string },
+	ctx: { user: { id: string }; session: { activeOrganizationId: string } },
+) =>
+	resolveAiApiKey({
+		apiKey: input.apiKey,
+		apiUrl: input.apiUrl,
+		aiId: input.aiId,
+		organizationId: ctx.session.activeOrganizationId,
+		authorize: () => hasPermission(ctx, { ai: ["update"] }),
+	});
+
+export const aiRouter = createTRPCRouter({
+	one: withAnyPermission("ai", ["read", "update"])
+		.input(z.object({ aiId: z.string() }))
+		.query(async ({ input, ctx }) => {
+			const setting = await getAiSettingById(
+				input.aiId,
+				ctx.session.activeOrganizationId,
+			);
+			return maskAiApiKey(setting);
+		}),
+
+	getModels: withAnyPermission("ai", ["read", "create", "update"])
+		.input(
+			z.object({
+				apiUrl: z.string().min(1),
+				apiKey: z.string(),
+				aiId: z.string().optional(),
+			}),
+		)
+		.query(async ({ input, ctx }) => {
+			try {
+				const apiKey = await resolveInputApiKey(input, ctx);
+				const providerName = getProviderName(input.apiUrl);
+				const headers = getProviderHeaders(input.apiUrl, apiKey);
+				let response = null;
+				switch (providerName) {
+					case "ollama":
+						response = await fetch(`${input.apiUrl}/api/tags`, { headers });
+						break;
+					case "gemini":
+						response = await fetch(
+							`${input.apiUrl}/models?key=${encodeURIComponent(apiKey)}`,
+							{ headers: {} },
+						);
+						break;
+					case "perplexity":
+						// Perplexity doesn't have a /models endpoint, return hardcoded list
+						return [
+							{
+								id: "sonar-deep-research",
+								object: "model",
+								created: Date.now(),
+								owned_by: "perplexity",
+							},
+							{
+								id: "sonar-reasoning-pro",
+								object: "model",
+								created: Date.now(),
+								owned_by: "perplexity",
+							},
+							{
+								id: "sonar-reasoning",
+								object: "model",
+								created: Date.now(),
+								owned_by: "perplexity",
+							},
+							{
+								id: "sonar-pro",
+								object: "model",
+								created: Date.now(),
+								owned_by: "perplexity",
+							},
+							{
+								id: "sonar",
+								object: "model",
+								created: Date.now(),
+								owned_by: "perplexity",
+							},
+						] as Model[];
+					case "zai":
+						return [
+							{
+								id: "glm-5",
+								object: "model",
+								created: Date.now(),
+								owned_by: "zai",
+							},
+							{
+								id: "glm-4.7",
+								object: "model",
+								created: Date.now(),
+								owned_by: "zai",
+							},
+						] as Model[];
+					case "minimax":
+						return [
+							{
+								id: "MiniMax-M2.7",
+								object: "model",
+								created: Date.now(),
+								owned_by: "minimax",
+							},
+						] as Model[];
+					default:
+						if (!apiKey)
+							throw new TRPCError({
+								code: "BAD_REQUEST",
+								message: "API key must contain at least 1 character(s)",
+							});
+						response = await fetch(`${input.apiUrl}/models`, { headers });
+				}
+
+				if (!response.ok) {
+					const errorText = await response.text();
+					throw new Error(`Failed to fetch models: ${errorText}`);
+				}
+
+				const res = await response.json();
+
+				if (Array.isArray(res)) {
+					return res.map((model) => ({
+						id: model.id || model.name,
+						object: "model",
+						created: Date.now(),
+						owned_by: "provider",
+					}));
+				}
+
+				if (res.models) {
+					return res.models.map((model: any) => ({
+						id: model.id || model.name,
+						object: "model",
+						created: Date.now(),
+						owned_by: "provider",
+					})) as Model[];
+				}
+
+				if (res.data) {
+					return res.data as Model[];
+				}
+
+				const possibleModels =
+					(Object.values(res).find(Array.isArray) as any[]) || [];
+				return possibleModels.map((model) => ({
+					id: model.id || model.name,
+					object: "model",
+					created: Date.now(),
+					owned_by: "provider",
+				})) as Model[];
+			} catch (error) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: error instanceof Error ? error?.message : `Error: ${error}`,
+				});
+			}
+		}),
+	create: withPermission("ai", "create")
+		.input(apiCreateAi)
+		.mutation(async ({ ctx, input }) => {
+			const result = await saveAiSettings(
+				ctx.session.activeOrganizationId,
+				input,
+			);
+			await audit(ctx, {
+				action: "create",
+				resourceType: "ai",
+				resourceName: input.name,
+			});
+			return result;
+		}),
+
+	update: withPermission("ai", "update")
+		.input(apiUpdateAi)
+		.mutation(async ({ ctx, input }) => {
+			const existing = await getAiSettingById(
+				input.aiId,
+				ctx.session.activeOrganizationId,
+			);
+			if (input.apiKey) {
+				input.apiKey = mergeAiApiKey(input.apiKey, existing.apiKey);
+			}
+			const result = await saveAiSettings(
+				ctx.session.activeOrganizationId,
+				input,
+				false,
+			);
+			await audit(ctx, {
+				action: "update",
+				resourceType: "ai",
+				resourceId: input.aiId,
+				resourceName: input.name,
+			});
+			return result;
+		}),
+
+	getAll: withAnyPermission("ai", ["read", "create", "update", "delete"]).query(
+		async ({ ctx }) => {
+			const settings = await getAiSettingsByOrganizationId(
+				ctx.session.activeOrganizationId,
+			);
+			return settings.map(({ apiKey, ...rest }) => rest);
+		},
+	),
+
+	delete: withPermission("ai", "delete")
+		.input(z.object({ aiId: z.string() }))
+		.mutation(async ({ input, ctx }) => {
+			const setting = await getAiSettingById(
+				input.aiId,
+				ctx.session.activeOrganizationId,
+			);
+			await deleteAiSettings(input.aiId, ctx.session.activeOrganizationId);
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "ai",
+				resourceId: input.aiId,
+				resourceName: setting.name,
+			});
+			return true;
+		}),
+
+	getCustomProviders: withAnyPermission("ai", [
+		"read",
+		"create",
+		"update",
+	]).query(async ({ ctx }) => {
+		return await getCustomAiProviders(ctx.session.activeOrganizationId);
+	}),
+
+	saveCustomProviders: adminProcedure
+		.input(apiSaveAiCustomProviders)
+		.mutation(async ({ ctx, input }) => {
+			return await saveCustomAiProviders(
+				ctx.session.activeOrganizationId,
+				input.providers,
+			);
+		}),
+
+	getEnabledProviders: withPermission("ai", "read").query(async ({ ctx }) => {
+		const settings = await getAiSettingsByOrganizationId(
+			ctx.session.activeOrganizationId,
+		);
+		return settings
+			.filter((s) => s.isEnabled)
+			.map((s) => ({ aiId: s.aiId, name: s.name, model: s.model }));
+	}),
+
+	analyzeLogs: withPermission("ai", "read")
+		.input(
+			z.object({
+				aiId: z.string().min(1),
+				logs: z.string().min(1),
+				context: z.enum(["build", "runtime"]),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			try {
+				const aiSettings = await getAiSettingById(
+					input.aiId,
+					ctx.session.activeOrganizationId,
+				);
+				if (!aiSettings?.isEnabled) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "AI provider is not enabled",
+					});
+				}
+
+				const provider = selectAIProvider(aiSettings);
+				const model = provider(aiSettings.model);
+
+				const contextLabel =
+					input.context === "build" ? "build/deployment" : "runtime/container";
+
+				const result = await generateText({
+					model,
+					prompt: `You are a DevOps engineer analyzing ${contextLabel} logs. Analyze the following logs and provide:
+
+1. **Summary**: A brief summary of what's happening
+2. **Issues Found**: Any errors, warnings, or problems detected
+3. **Root Cause**: The most likely root cause if there are errors
+4. **Suggested Fix**: Actionable steps to resolve the issues
+
+Be concise and practical. Focus on the most important issues. If the logs look healthy, say so briefly.
+
+Logs:
+${input.logs}`,
+				});
+
+				return { analysis: result.text };
+			} catch (error) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message:
+						error instanceof Error
+							? error.message
+							: `Analysis failed: ${error}`,
+				});
+			}
+		}),
+
+	testConnection: withAnyPermission("ai", ["create", "update"])
+		.input(
+			z.object({
+				apiUrl: z.string().min(1),
+				apiKey: z.string(),
+				model: z.string().min(1),
+				aiId: z.string().optional(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			try {
+				const apiKey = await resolveInputApiKey(input, ctx);
+				const provider = selectAIProvider({
+					apiUrl: input.apiUrl,
+					apiKey,
+				});
+				const model = provider(input.model);
+				const result = await generateText({
+					model,
+					prompt: "Reply with 'ok'",
+				});
+				if (!result.text) {
+					throw new Error("No response received from the model");
+				}
+				return { success: true, message: "Connection successful" };
+			} catch (error) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message:
+						error instanceof Error
+							? error.message
+							: `Connection failed: ${error}`,
+				});
+			}
+		}),
+
+	suggest: withPermission("ai", "read")
+		.input(
+			z.object({
+				aiId: z.string(),
+				input: z.string(),
+				serverId: z.string().optional(),
+			}),
+		)
+		.mutation(async ({ ctx, input }) => {
+			try {
+				return await suggestVariants({
+					...input,
+					organizationId: ctx.session.activeOrganizationId,
+				});
+			} catch (error) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: error instanceof Error ? error?.message : `Error: ${error}`,
+				});
+			}
+		}),
+	deploy: withPermission("ai", "read")
+		.input(deploySuggestionSchema)
+		.mutation(async ({ ctx, input }) => {
+			const environment = await findEnvironmentById(input.environmentId);
+			const project = await findProjectById(environment.projectId);
+			await checkServiceAccess(ctx, environment.projectId, "create");
+
+			if (IS_CLOUD && !input.serverId) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "You need to use a server to create a compose",
+				});
+			}
+
+			const projectName = slugify(`${project.name} ${input.id}`);
+
+			const compose = await createComposeByTemplate({
+				...input,
+				composeFile: input.dockerCompose,
+				env: input.envVariables,
+				serverId: input.serverId,
+				name: input.name,
+				sourceType: "raw",
+				appName: `${projectName}-${generatePassword(6)}`,
+				environmentId: input.environmentId,
+			});
+
+			if (input.domains && input.domains?.length > 0) {
+				for (const domain of input.domains) {
+					await createDomain({
+						...domain,
+						domainType: "compose",
+						certificateType: "none",
+						composeId: compose.composeId,
+					});
+				}
+			}
+			if (input.configFiles && input.configFiles?.length > 0) {
+				for (const mount of input.configFiles) {
+					await createMount({
+						filePath: mount.filePath,
+						mountPath: "",
+						content: mount.content,
+						serviceId: compose.composeId,
+						serviceType: "compose",
+						type: "file",
+					});
+				}
+			}
+
+			await addNewService(ctx, compose.composeId);
+
+			return null;
+		}),
+});

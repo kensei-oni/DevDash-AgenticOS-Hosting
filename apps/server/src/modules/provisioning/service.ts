@@ -16,7 +16,11 @@ export function provisioningService({ db, runDir, onReady }: { db: Db; runDir: s
   }
 
   async function ensure(u: User) {
-    if (!runDir) return void s.set.run(now(), null, u.id) // dev machine: no host integration
+    if (!runDir) {
+      s.set.run(now(), null, u.id)
+      onReady?.(u.username)
+      return
+    }
     try {
       const r = await requestLine<{ ok: boolean; error?: string }>(join(runDir, 'helper.sock'), {
         cmd: 'user-ensure',

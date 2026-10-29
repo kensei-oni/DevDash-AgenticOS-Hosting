@@ -77,3 +77,6 @@
 		header_up X-DevDash-Services 1
 	}
 }
+
+# agOS Hosting (deploy/hosting-install.sh): Dokploy's dashboard on :3443 and hosted apps' domains. Absent until installed.
+import /etc/caddy/devdash-hosting*.caddy

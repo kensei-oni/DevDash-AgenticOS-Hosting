@@ -119,6 +119,22 @@ export function TerminalPage() {
             })}
             <Button variant="outline" onClick={() => setAdding(true)}><Plus />New terminal</Button>
           </EmptyContent>
+          <div className="mt-3 flex flex-wrap items-center justify-center gap-1.5 text-xs">
+            <span className="text-muted-foreground mr-1">Launch AI Agent CLI:</span>
+            {[
+              ['cli-claude', 'Claude CLI'],
+              ['cli-opencode', 'OpenCode CLI'],
+              ['cli-openrouter', 'OpenRouter CLI'],
+              ['cli-codex', 'Codex CLI'],
+              ['cli-antigravity', 'Antigravity CLI'],
+              ['cli-grok', 'Grok CLI'],
+            ].map(([tab, label]) => (
+              <Button key={tab} size="sm" variant="outline" className="h-7 px-2.5 text-xs font-mono"
+                onClick={() => { setOpened((o) => (o.includes(tab!) ? o : [...o, tab!])); open(tab!) }}>
+                {label}
+              </Button>
+            ))}
+          </div>
         </Empty>
       ) : <>
       <div className={cn('relative my-2 min-h-0 flex-1 overflow-hidden rounded-lg bg-term-bg p-2 md:my-4', isAdmin && 'ring-2 ring-destructive')}>

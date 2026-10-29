@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { transaction, type Db } from '../../core/db.ts'
 import type { Hub } from '../../core/hub.ts'
 import { AppError } from '../../core/http.ts'
@@ -65,6 +67,23 @@ export function checkTailnetMcps(list: unknown): TailnetMcp[] {
     while (seen.has(name)) name = `${name}-${i + 1}` // keep names distinct so each registers as its own MCP server
     seen.add(name)
     return { name, url }
+  })
+}
+
+/** Validates custom HTTP/HTTPS MCP URLs for normal sessions (when not routing over tailnet). */
+export function checkCustomMcps(list: unknown): TailnetMcp[] {
+  if (!Array.isArray(list)) throw new AppError(400, 'bad_mcp', 'Custom MCPs must be a list.')
+  if (list.length > MAX_MCPS) throw new AppError(400, 'bad_mcp', `At most ${MAX_MCPS} custom MCPs.`)
+  const seen = new Set<string>()
+  return list.map((e, i) => {
+    const raw = String((e as TailnetMcp)?.url ?? '').trim()
+    let u: URL
+    try { u = new URL(raw) } catch { throw new AppError(400, 'bad_mcp', 'Enter a full MCP URL, like http://localhost:3333/mcp.') }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new AppError(400, 'bad_mcp', 'The MCP URL must be http or https.')
+    let name = mcpSlug(String((e as TailnetMcp)?.name ?? ''), i)
+    while (seen.has(name)) name = `${name}-${i + 1}`
+    seen.add(name)
+    return { name, url: u.toString() }
   })
 }
 /** The session's tailnet MCPs as stored (JSON array), tolerating the legacy single `tailnet_mcp`. */
@@ -583,7 +602,11 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
    * is saved in the owner's account and its path added to the message, so Claude can open it with its tools.
    */
   /** Where a session's attachments are saved, in its owner's account (the janitor clears ones left two weeks). */
-  const uploadsDir = (s: SessionRow) => `/home/${s.owner_username}/.cache/devdash/uploads/${s.id}`
+  const resolveHome = (username: string) =>
+    process.env.DEVDASH_LOCAL_AGENT_SOCKET && !existsSync(`/home/${username}`)
+      ? homedir().replace(/\\/g, '/')
+      : `/home/${username}`
+  const uploadsDir = (s: SessionRow) => `${resolveHome(s.owner_username)}/.cache/devdash/uploads/${s.id}`
 
   async function attach(s: SessionRow, uuid: string, files: Attachment[], uploads: Upload[] = []) {
     const docs: unknown[] = []
@@ -719,12 +742,12 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
       shared?: boolean; sharedCanSend?: boolean
     }, extra: SessionExtras = {}) {
       if (!PROFILE_RE.test(input.profile)) throw new AppError(400, 'bad_profile', 'Unknown profile.')
-      const home = `/home/${user.username}`
+      const home = resolveHome(user.username)
       // In a project: its shared checkout, or a fresh worktree on its own branch so parallel sessions don't collide.
       const wt = input.project && input.worktree ? await projects.worktree(user, input.project) : null
       const cwd = wt?.path ?? (input.project ? projects.path(projects.bySlug(input.project).slug)
         : input.cwd.trim() === '' || input.cwd.trim() === '~' ? home : input.cwd.trim().replace(/^~(?=\/)/, home))
-      if (!cwd.startsWith('/')) throw new AppError(400, 'bad_cwd', 'Use a full folder path, like ~/projects/app.')
+      if (!cwd.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(cwd)) throw new AppError(400, 'bad_cwd', 'Use a full folder path, like ~/projects/app.')
       // Outside a project the session gets its own folder (the dialog suggests ~/sessions/<name>); make it if it's new.
       if (!input.project) await agents.request(user.username, { op: 'fs.mkdirp', path: cwd })
       const project = input.project ? projects.bySlug(input.project) : projects.forPath(cwd)
@@ -908,7 +931,9 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
       const mcps = p.tailnetMcps !== undefined ? p.tailnetMcps
         : p.tailnetMcp !== undefined ? (p.tailnetMcp?.trim() ? [{ name: 'ida', url: p.tailnetMcp }] : [])
         : undefined
-      const tailnetMcps = mcps === undefined ? undefined : JSON.stringify(checkTailnetMcps(mcps ?? []))
+      const wantTailnet = p.reachTailnet ?? !!s.reach_tailnet
+      const tailnetMcps = mcps === undefined ? undefined
+        : JSON.stringify(wantTailnet ? checkTailnetMcps(mcps ?? []) : checkCustomMcps(mcps ?? []))
       const touchedTailnet = p.reachTailnet !== undefined || p.tailnetMcp !== undefined || p.tailnetMcps !== undefined
       const patch: Patch = {
         title: p.title?.trim().slice(0, 120) || undefined,
@@ -1067,6 +1092,19 @@ export function claudeService({ db, agents, hub, notify, projects, tailnetConnec
       defaults: repo.defaults(user.id),
     }),
     createProfile: (user: User, name: string) => agents.request(user.username, { op: 'claude.profile.create', name }),
+    clis: (user: User) => agents.request<{
+      clis: {
+        id: 'claude' | 'opencode' | 'openrouter' | 'codex' | 'antigravity' | 'grok'
+        name: string; binary: string; installed: boolean; version: string | null
+        keyName: string | null; keyConfigured: boolean; mcpWired: boolean; terminalTab: string
+        installHint: string; description: string
+      }[]
+      config: Record<string, boolean | string | null>
+    }>(user.username, { op: 'ai.clis.status' }, 25_000),
+    configureClis: (user: User, config: Record<string, string | undefined>) =>
+      agents.request<{ config: Record<string, unknown> }>(user.username, { op: 'ai.clis.configure', config }, 15_000),
+    installCli: (user: User, id: 'claude' | 'opencode' | 'openrouter' | 'codex' | 'antigravity' | 'grok') =>
+      agents.request<{ ok: boolean; output: string }>(user.username, { op: 'ai.clis.install', id }, 190_000),
     memoryHealth: (user: User) => memoryHealth(agents, user.username),
     restartMemory: async (user: User) => {
       await agents.request(user.username, { op: 'claude.memory.restart' }, 70_000)

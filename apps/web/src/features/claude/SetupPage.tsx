@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient, queryOptions } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { LogIn, Plus, RotateCw } from 'lucide-react'
+import { Download, KeyRound, LogIn, Plus, RotateCw, SquareTerminal } from 'lucide-react'
 import { toast } from 'sonner'
 import { StatusLight } from '@/components/app/brand'
 import { PageBody, PageHeader, SettingsSection } from '@/components/app/page'
@@ -76,9 +76,162 @@ export function SetupPage() {
             </p>
         </SettingsSection>
         {!q.isPending && profiles.length > 0 && <MemorySection profiles={profiles} />}
+        <MultiCliSection />
         {q.data && <DefaultsCard profiles={profiles} initial={q.data.defaults} />}
       </PageBody>
     </>
+  )
+}
+
+const clisQuery = queryOptions({
+  queryKey: ['claude', 'clis'],
+  queryFn: () => unwrap(api.api.claude.clis.$get()),
+  staleTime: 15_000,
+})
+
+function MultiCliSection() {
+  const qc = useQueryClient()
+  const navigate = useNavigate()
+  const q = useQuery(clisQuery)
+  const [keys, setKeys] = useState({
+    OPENROUTER_API_KEY: '',
+    OPENROUTER_MODEL: '',
+    OPENAI_API_KEY: '',
+    XAI_API_KEY: '',
+    GEMINI_API_KEY: '',
+    ANTHROPIC_API_KEY: '',
+  })
+
+  useEffect(() => {
+    const m = q.data?.config?.OPENROUTER_MODEL
+    if (typeof m === 'string') setKeys((k) => ({ ...k, OPENROUTER_MODEL: k.OPENROUTER_MODEL || m }))
+  }, [q.data?.config?.OPENROUTER_MODEL])
+
+  const saveKeys = useMutation({
+    mutationFn: () => {
+      const payload: Record<string, string> = {}
+      for (const [k, v] of Object.entries(keys)) {
+        if (v.trim()) payload[k] = v.trim()
+      }
+      return unwrap(api.api.claude.clis.$put({ json: payload }))
+    },
+    onSuccess: () => {
+      toast.success('AI CLI API keys & MCP integrations saved')
+      setKeys((k) => ({
+        OPENROUTER_API_KEY: '',
+        OPENROUTER_MODEL: k.OPENROUTER_MODEL,
+        OPENAI_API_KEY: '',
+        XAI_API_KEY: '',
+        GEMINI_API_KEY: '',
+        ANTHROPIC_API_KEY: '',
+      }))
+      void qc.invalidateQueries({ queryKey: clisQuery.queryKey })
+      void qc.invalidateQueries({ queryKey: profilesQuery.queryKey })
+    },
+  })
+
+  const install = useMutation({
+    mutationFn: (id: 'claude' | 'opencode' | 'openrouter' | 'codex' | 'antigravity' | 'grok') =>
+      unwrap(api.api.claude.clis[':id'].install.$post({ param: { id } })),
+    onSuccess: (_r, id) => {
+      toast.success(`Installed ${id} CLI`)
+      void qc.invalidateQueries({ queryKey: clisQuery.queryKey })
+    },
+  })
+
+  const clis = q.data?.clis ?? []
+
+  return (
+    <SettingsSection
+      title="Multi-CLI AI Agents"
+      description="agOS supports Claude Code CLI, OpenCode CLI, OpenRouter CLI, OpenAI Codex CLI, Google Antigravity CLI (agy), and xAI Grok CLI — all pre-wired with the agOS Hosting, Monitor & Live Browser MCP server."
+    >
+      <ErrorAlert error={q.error ?? saveKeys.error ?? install.error} />
+      {q.isPending ? (
+        <Skeleton className="h-32" />
+      ) : (
+        <ItemGroup className="rounded-lg border">
+          {clis.map((c) => (
+            <Item key={c.id} className="rounded-none border-0 border-b last:border-b-0">
+              <ItemMedia><StatusLight state={c.installed ? 'live' : 'idle'} /></ItemMedia>
+              <ItemContent>
+                <ItemTitle className="flex items-center gap-2">
+                  <span>{c.name}</span>
+                  <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
+                    {c.installed ? (c.version ?? 'installed') : 'not installed'}
+                  </span>
+                  {c.keyConfigured && (
+                    <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[11px] text-emerald-600 dark:text-emerald-400">
+                      Key ready
+                    </span>
+                  )}
+                </ItemTitle>
+                <ItemDescription>{c.description}</ItemDescription>
+              </ItemContent>
+              <ItemActions className="flex items-center gap-1.5">
+                {!c.installed && c.id !== 'openrouter' && (
+                  <Button size="sm" variant="outline" disabled={install.isPending} onClick={() => install.mutate(c.id)}>
+                    <Download />Install
+                  </Button>
+                )}
+                <Button size="sm" variant="outline" onClick={() => void navigate({ to: '/terminal', search: { open: c.terminalTab } })}>
+                  <SquareTerminal />Open CLI
+                </Button>
+              </ItemActions>
+            </Item>
+          ))}
+        </ItemGroup>
+      )}
+
+      <form onSubmit={(e) => { e.preventDefault(); saveKeys.mutate() }} className="mt-2 rounded-lg border p-3.5">
+        <div className="mb-3 flex items-center gap-2 text-sm font-medium">
+          <KeyRound className="size-4" />API Keys for OpenCode, OpenRouter, Codex, Antigravity &amp; Grok
+        </div>
+        <FieldGroup>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field>
+              <FieldLabel htmlFor="k-or">OPENROUTER_API_KEY (OpenRouter &amp; OpenCode)</FieldLabel>
+              <Input id="k-or" type="password" className="h-9 font-mono text-xs"
+                placeholder={q.data?.config?.OPENROUTER_API_KEY ? '•••••••• (configured)' : 'sk-or-v1-...'}
+                value={keys.OPENROUTER_API_KEY} onChange={(e) => setKeys((k) => ({ ...k, OPENROUTER_API_KEY: e.target.value }))} />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="k-orm">Default OpenRouter Model</FieldLabel>
+              <Input id="k-orm" className="h-9 font-mono text-xs"
+                placeholder="anthropic/claude-sonnet-4"
+                value={keys.OPENROUTER_MODEL} onChange={(e) => setKeys((k) => ({ ...k, OPENROUTER_MODEL: e.target.value }))} />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="k-oa">OPENAI_API_KEY (Codex CLI)</FieldLabel>
+              <Input id="k-oa" type="password" className="h-9 font-mono text-xs"
+                placeholder={q.data?.config?.OPENAI_API_KEY ? '•••••••• (configured)' : 'sk-...'}
+                value={keys.OPENAI_API_KEY} onChange={(e) => setKeys((k) => ({ ...k, OPENAI_API_KEY: e.target.value }))} />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="k-xai">XAI_API_KEY (Grok CLI)</FieldLabel>
+              <Input id="k-xai" type="password" className="h-9 font-mono text-xs"
+                placeholder={q.data?.config?.XAI_API_KEY ? '•••••••• (configured)' : 'xai-...'}
+                value={keys.XAI_API_KEY} onChange={(e) => setKeys((k) => ({ ...k, XAI_API_KEY: e.target.value }))} />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="k-gem">GEMINI_API_KEY (Antigravity CLI)</FieldLabel>
+              <Input id="k-gem" type="password" className="h-9 font-mono text-xs"
+                placeholder={q.data?.config?.GEMINI_API_KEY ? '•••••••• (configured)' : 'AIza...'}
+                value={keys.GEMINI_API_KEY} onChange={(e) => setKeys((k) => ({ ...k, GEMINI_API_KEY: e.target.value }))} />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="k-ant">ANTHROPIC_API_KEY (optional)</FieldLabel>
+              <Input id="k-ant" type="password" className="h-9 font-mono text-xs"
+                placeholder={q.data?.config?.ANTHROPIC_API_KEY ? '•••••••• (configured)' : 'sk-ant-...'}
+                value={keys.ANTHROPIC_API_KEY} onChange={(e) => setKeys((k) => ({ ...k, ANTHROPIC_API_KEY: e.target.value }))} />
+            </Field>
+          </div>
+          <Button type="submit" size="sm" className="self-start" disabled={saveKeys.isPending}>
+            {saveKeys.isPending ? 'Saving…' : 'Save keys & wire MCP'}
+          </Button>
+        </FieldGroup>
+      </form>
+    </SettingsSection>
   )
 }
 

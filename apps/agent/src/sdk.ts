@@ -1,10 +1,26 @@
-// The Agent SDK is loaded from the system-wide Claude install (deploy/claude-update.sh), not from DevDash's
-// node_modules, so Chat mode and CLI mode always run the same Claude Code version.
+// The Agent SDK is loaded from the system-wide Claude install (deploy/claude-update.sh) on Linux, or from
+// data/claude-sdk / node_modules on local machines, so Chat mode and CLI mode always run the real Claude Code.
+import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
-export const CLAUDE_HOME = process.env.DEVDASH_CLAUDE_HOME ?? '/opt/devdash/claude/current'
-export const CLAUDE_BIN = join(CLAUDE_HOME, 'bin', 'claude')
+const ROOT_DIR = fileURLToPath(new URL('../../..', import.meta.url))
+export const CLAUDE_HOME = process.env.DEVDASH_CLAUDE_HOME
+  ?? (existsSync('/opt/devdash/claude/current') ? '/opt/devdash/claude/current' : join(ROOT_DIR, 'data', 'claude-sdk'))
+
+function resolveClaudeBin(): string {
+  const candidates = [
+    process.env.DEVDASH_CLAUDE_BIN,
+    join(CLAUDE_HOME, 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude'),
+    join(homedir(), '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude'),
+    join(CLAUDE_HOME, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'cli.js'),
+  ].filter((c): c is string => Boolean(c))
+  for (const c of candidates) if (existsSync(c)) return c
+  return process.platform === 'win32' ? 'claude.exe' : 'claude'
+}
+
+export const CLAUDE_BIN = resolveClaudeBin()
 
 // Minimal types for the parts of @anthropic-ai/claude-agent-sdk DevDash uses (full types: sdk.d.ts in the package).
 export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto'
@@ -50,5 +66,15 @@ type Sdk = {
 }
 
 let sdk: Promise<Sdk> | undefined
-export const loadSdk = () =>
-  (sdk ??= import(pathToFileURL(join(CLAUDE_HOME, 'node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs')).href) as Promise<Sdk>)
+export const loadSdk = () => {
+  if (!sdk) {
+    const candidates = [
+      join(CLAUDE_HOME, 'node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs'),
+      join(ROOT_DIR, 'data/claude-sdk/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs'),
+      join(ROOT_DIR, 'node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs'),
+    ]
+    const found = candidates.find((p) => existsSync(p)) ?? candidates[0]!
+    sdk = import(pathToFileURL(found).href) as Promise<Sdk>
+  }
+  return sdk
+}

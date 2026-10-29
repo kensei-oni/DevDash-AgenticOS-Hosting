@@ -136,6 +136,20 @@ export function claudeRoutes(claude: ClaudeService, mw: ReturnType<typeof authMi
     .get('/commands', query(z.object({ profile: z.string().max(21).default('default') })), async (c) =>
       c.json(await claude.commands(c.get('user'), c.req.valid('query').profile)))
     .get('/profiles', async (c) => c.json(await claude.profiles(c.get('user'))))
+    .get('/clis', async (c) => c.json(await claude.clis(c.get('user'))))
+    .put('/clis', json(z.object({
+      OPENROUTER_API_KEY: z.string().max(500).optional(),
+      OPENAI_API_KEY: z.string().max(500).optional(),
+      XAI_API_KEY: z.string().max(500).optional(),
+      GEMINI_API_KEY: z.string().max(500).optional(),
+      ANTHROPIC_API_KEY: z.string().max(500).optional(),
+      OPENROUTER_MODEL: z.string().max(200).optional(),
+    })), async (c) => c.json(await claude.configureClis(c.get('user'), c.req.valid('json'))))
+    .post('/clis/:id/install', async (c) => {
+      const r = z.enum(['claude', 'opencode', 'openrouter', 'codex', 'antigravity', 'grok']).safeParse(c.req.param('id'))
+      if (!r.success) throw new AppError(404, 'not_found', 'Unknown CLI.')
+      return c.json(await claude.installCli(c.get('user'), r.data))
+    })
     .get('/usage/:profile', async (c) => c.json({ usage: await claude.usage(c.get('user'), c.req.param('profile')) }))
     .post('/profiles', json(z.object({ name: z.string().max(21) })), async (c) => {
       await claude.createProfile(c.get('user'), c.req.valid('json').name)

@@ -566,7 +566,12 @@ function SessionMenu({ s, isOwner, canSend, access, onUpdate, onShare, onRename,
           <>
             <DropdownMenuItem onSelect={onRename}><Pencil />Rename</DropdownMenuItem>
             <DropdownMenuItem onSelect={onUsage}><Gauge />Usage</DropdownMenuItem>
-            <DropdownMenuItem onSelect={onTailnet}><Network />Reach my tailnet{s.reachTailnet ? ' · on' : ''}</DropdownMenuItem>
+            <DropdownMenuItem onSelect={onTailnet}>
+              <Network />Integrations &amp; Tailnet
+              <span className="ml-auto truncate text-xs text-muted-foreground">
+                {s.tailnetMcps?.length ? `${s.tailnetMcps.length} custom` : s.reachTailnet ? 'tailnet' : 'built-in'}
+              </span>
+            </DropdownMenuItem>
             <DropdownMenuItem onSelect={onShare}>
               <Share2 />Share…<span className="ml-auto truncate text-xs text-muted-foreground">{sharingLabel(s) || 'only you'}</span>
             </DropdownMenuItem>
@@ -630,7 +635,7 @@ function TailnetDialog({ open, onOpenChange, s, onUpdate }: {
     setSaving(true)
     setError(null)
     try {
-      const clean = reach ? mcps.filter((m) => m.url.trim()).map((m) => ({ name: m.name.trim(), url: m.url.trim() })) : []
+      const clean = mcps.filter((m) => m.url.trim()).map((m) => ({ name: m.name.trim(), url: m.url.trim() }))
       await onUpdate({ reachTailnet: reach, tailnetMcps: clean })
       onOpenChange(false)
     } catch (err) {
@@ -640,13 +645,45 @@ function TailnetDialog({ open, onOpenChange, s, onUpdate }: {
     }
   }
   return (
-    <ResponsiveDialog open={open} onOpenChange={onOpenChange} title="Reach my tailnet"
-      description="Let this session reach your private Tailscale devices by their 100.x addresses. Your own Claude/Anthropic traffic is never routed through it.">
+    <ResponsiveDialog open={open} onOpenChange={onOpenChange} title="Session integrations & Tailnet"
+      description="Every normal Claude session includes built-in agOS Hosting, Live Browser, and Server Monitor integrations, plus any custom MCP servers you attach here.">
       <form onSubmit={save}>
         <FieldGroup>
+          <div className="space-y-2 rounded-lg border bg-muted/30 p-3 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="font-medium text-foreground">Dokploy Hosting (built-in)</span>
+              <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[11px] text-emerald-600 dark:text-emerald-400">Active</span>
+            </div>
+            <p className="text-muted-foreground">
+              Claude can create, edit (<code>hosting_update</code>), manage domains (<code>hosting_domain_add</code> / <code>hosting_domain_remove</code>), inspect logs, and deploy/redeploy apps on the bundled Dokploy engine right in this session.
+            </p>
+            <div className="flex items-center justify-between pt-1">
+              <span className="font-medium text-foreground">Live Browser &amp; Server Monitor (built-in)</span>
+              <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[11px] text-emerald-600 dark:text-emerald-400">Active</span>
+            </div>
+            <p className="text-muted-foreground">
+              Claude can control the real-time shared browser (<code>browser_*</code>) and read live CPU, RAM, disk, network, and container metrics (<code>hosting_monitor</code>).
+            </p>
+          </div>
+          <Field>
+            <FieldLabel>Custom MCP integrations (optional)</FieldLabel>
+            {mcps.map((m, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <Input className="h-10 w-28 font-mono" placeholder="name" value={m.name} onChange={(e) => setRow(i, 'name', e.target.value)} />
+                <Input className="h-10 flex-1 font-mono" placeholder={reach ? 'http://100.x.x.x:13337/mcp' : 'http://localhost:3333/mcp'} value={m.url} onChange={(e) => setRow(i, 'url', e.target.value)} />
+                <Button type="button" size="icon" variant="ghost" className="size-10 shrink-0" aria-label="Remove" onClick={() => setMcps((v) => v.filter((_, j) => j !== i))}><X /></Button>
+              </div>
+            ))}
+            <Button type="button" size="sm" variant="outline" className="self-start" disabled={mcps.length >= 8} onClick={() => setMcps((v) => [...v, { name: '', url: '' }])}><Plus />Add custom MCP</Button>
+            <FieldDescription>
+              {reach
+                ? 'MCP servers on your tailnet (e.g. IDA Pro), each exposed to this session over the proxy. Hosts must be tailnet addresses (100.x or *.ts.net).'
+                : 'Attach up to 8 HTTP/HTTPS MCP servers to this session so Claude can call their tools alongside built-in Hosting and Browser tools.'}
+            </FieldDescription>
+          </Field>
           {!connected && (
             <p className="rounded-md bg-muted px-3 py-2 text-sm text-muted-foreground">
-              No connected tailnet node. <Link to="/network" className="underline underline-offset-4" onClick={() => onOpenChange(false)}>Connect it on the Network page</Link> first.
+              No connected tailnet node. <Link to="/network" className="underline underline-offset-4" onClick={() => onOpenChange(false)}>Connect it on the Network page</Link> to route through private 100.x devices.
             </p>
           )}
           <label className="flex cursor-pointer items-start justify-between gap-3 text-sm">
@@ -656,20 +693,6 @@ function TailnetDialog({ open, onOpenChange, s, onUpdate }: {
             </span>
             <Switch checked={reach} disabled={!connected} onCheckedChange={setReach} className="mt-0.5" />
           </label>
-          {reach && (
-            <Field>
-              <FieldLabel>Tailnet MCP servers (optional)</FieldLabel>
-              {mcps.map((m, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <Input className="h-10 w-28 font-mono" placeholder="name" value={m.name} onChange={(e) => setRow(i, 'name', e.target.value)} />
-                  <Input className="h-10 flex-1 font-mono" placeholder="http://100.x.x.x:13337/mcp" value={m.url} onChange={(e) => setRow(i, 'url', e.target.value)} />
-                  <Button type="button" size="icon" variant="ghost" className="size-10 shrink-0" aria-label="Remove" onClick={() => setMcps((v) => v.filter((_, j) => j !== i))}><X /></Button>
-                </div>
-              ))}
-              <Button type="button" size="sm" variant="outline" className="self-start" disabled={mcps.length >= 8} onClick={() => setMcps((v) => [...v, { name: '', url: '' }])}><Plus />Add MCP</Button>
-              <FieldDescription>MCP servers on your tailnet (e.g. IDA Pro), each exposed to this session over the proxy and named for Claude. Hosts must be tailnet addresses (100.x or a *.ts.net name). Up to 8.</FieldDescription>
-            </Field>
-          )}
           <ErrorAlert error={error} />
           <p className="text-xs text-muted-foreground">Takes effect when Claude next starts this session.</p>
           <Button type="submit" className="h-10" disabled={saving || (reach && !connected)}>{saving ? 'Saving…' : 'Save'}</Button>

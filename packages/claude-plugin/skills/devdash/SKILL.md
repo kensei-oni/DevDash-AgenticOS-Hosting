@@ -20,6 +20,12 @@ You run on a shared DevDash server that the team uses from their phones and PCs.
 - Anything long-running goes through `devdash service add <name> --cmd '…'` in Bash, never a foreground or background Bash process. It gets its own `$PORT`; bind to 127.0.0.1.
 - Look first: `services_list` / `devdash service ls` and `devdash service ports`. Reuse what's running.
 
+## Hosting on the internet (agOS Hosting, Dokploy)
+- For something that should be public on its own domain (a site, an API, a compose stack), use the hosting tools, not `devdash service add` (that's for dev servers on this machine).
+- `hosting_status` first: if it isn't configured, tell the person to finish the setup on the Hosting page. `hosting_list` to reuse what's there.
+- `hosting_create` with a pushed `git_url` (and `port` the app listens on), a `docker_image` or a `compose_file`. Then poll `hosting_get` until the latest deployment is `done`; on `error` read `hosting_logs`, fix, push and `hosting_action` `redeploy`. Finish with the public URL.
+- Never delete without asking; only admins can.
+
 ## Branches
 - If this session runs in a worktree (`/srv/devdash/worktrees/...`), you're on your own `dd/…` branch: commit there; the person merges or opens a PR.
 

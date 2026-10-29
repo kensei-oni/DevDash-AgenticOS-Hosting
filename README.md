@@ -7,16 +7,20 @@
 
 <br>
 
-**A self-hosted workspace where a small team and its AI agents build software together, on one Linux server you own.**
+**A self-hosted workspace where a small team and its AI agents build, host, and monitor software together, on one Linux server you own.**
 
+[![Status: Demo Under Testing](https://img.shields.io/badge/status-demo%20under%20testing-amber.svg)](#)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Node 24](https://img.shields.io/badge/node-%E2%89%A5%2024.7-339933?logo=node.js&logoColor=white)
 ![Ubuntu 24.04](https://img.shields.io/badge/server-Ubuntu%2024.04-E95420?logo=ubuntu&logoColor=white)
 ![Platforms](https://img.shields.io/badge/apps-web%20%7C%20Windows%20%7C%20Android%20%7C%20iOS-555)
 
-[Features](#features) · [How it works](#how-it-works) · [Self-hosting](#self-hosting) · [Configuration](#configuration) · [Native apps](#native-apps) · [Development](#development) · [Security](#security)
+[Features](#features) · [Bundled Dokploy Hosting](#bundled-dokploy-hosting) · [Multi-CLI AI Agents](#multi-cli-ai-agents) · [How it works](#how-it-works) · [Self-hosting](#self-hosting) · [Configuration](#configuration) · [Development](#development)
 
 </div>
+
+> [!IMPORTANT]
+> **Demo / Under Active Testing:** This build (`DevDash-AgenticOS-Hosting`) is currently an experimental **demo under active testing**. It integrates the full **Dokploy** PaaS engine directly beside agOS on isolated ports (`:3010` UI/API, `:8880`/`:8843` Traefik), adds live Server & Container telemetry (`/monitor`), real-time CDP AI Browser control (`/browser`), and multi-CLI agent orchestration (`claude`, `opencode`, `openrouter`, `codex`, `antigravity`, `grok`). Use with caution in production environments while testing is ongoing.
 
 ---
 
@@ -58,6 +62,32 @@ Every session is Claude Code itself, run as the member who started it.
 - **Project instructions** apply to every new session in a project, like a Claude Project.
 - **Team roles (optional).** AI team members per project (CEO, CTO, marketing and so on) with goals, schedules,
   triggers, threads, approvals and a shared notebook. Switch them off server-wide with `DEVDASH_TEAM=0`.
+
+### Bundled Dokploy Hosting
+
+Full **Dokploy** PaaS (`apps/hosting`) runs directly beside agOS as a companion service—styled with the agOS neutral monochrome theme and bound to non-colliding ports so it never interferes with Caddy or agOS services:
+
+- **Non-colliding ports:** Dokploy UI & API run on `127.0.0.1:3010` (`DEVDASH_HOSTING_PORT`), while Dokploy's Traefik ingress listens on `:8880` (HTTP) and `:8843` (HTTPS).
+- **Zero-config internal authentication:** agOS authenticates directly to its bundled Dokploy engine using `x-agos-key` (`DEVDASH_MASTER_KEY`)—no external API token required.
+- **Applications, Compose & Managed Databases:** Create and manage Nixpacks/Dockerfile Applications, Docker Compose stacks, and managed **PostgreSQL, MySQL, MariaDB, MongoDB, and Redis** databases directly from `/hosting` or through AI sessions.
+- **Embedded Dokploy Studio:** Toggle **Dokploy Studio** inside `/hosting` to access any of Dokploy's 40+ native pages (Swarm cluster settings, Docker registries, S3 backup destinations, schedules, certificates, and monitoring) styled in agOS's monochrome theme.
+- **Real Claude Code Log Analysis & MCP Control:** Clicking **AI Analyze Logs** or **Ask Claude** launches a real Claude Code session (`claude.create`) with full access to `hosting_overview`, `hosting_create_app`, `hosting_create_database`, `hosting_update_app`, `hosting_action`, `hosting_add_domain`, `hosting_remove_domain`, `hosting_logs`, and `hosting_dokploy_api` (direct pass-through to all 40+ Dokploy tRPC routers), plus custom HTTP/HTTPS MCP server integrations.
+
+### Multi-CLI AI Agents
+
+In addition to **Claude Code**, agOS supports multiple terminal and agent CLIs out of the box from `/claude/setup` and `/terminal`, automatically pre-wired with the agOS MCP server (`hosting_*`, `browser_*`, `hosting_monitor`, tasks, notes, and services):
+
+- **Claude Code CLI** (`claude`) — Anthropic's official coding agent.
+- **OpenCode CLI** (`opencode`) — Open-source terminal coding agent (`opencode-ai`), auto-configured via `~/.config/opencode/opencode.json`.
+- **OpenRouter CLI** (`openrouter`) — Run `opencode` or `claude` backed by any OpenRouter model via `OPENROUTER_API_KEY`.
+- **OpenAI Codex CLI** (`codex`) — `@openai/codex` terminal agent with `OPENAI_API_KEY`.
+- **Antigravity CLI** (`agy` / `antigravity`) — Google Antigravity agentic CLI with `GEMINI_API_KEY`.
+- **Grok CLI** (`grok`) — xAI Grok terminal agent (`@vibe-kit/grok-cli`), auto-configured via `~/.grok/mcp-config.json` and `XAI_API_KEY`.
+
+### Server Monitor & Real-Time AI Browser
+
+- **Server & Container Monitor (`/monitor`):** Real-time OS telemetry (live CPU %, RAM, Swap, Disk mounts, Network RX/TX rates with 60-sample rolling sparklines, `docker stats` per container, and bundled Dokploy health), also exposed to AI agents via the `hosting_monitor` MCP tool.
+- **Real-Time AI Browser (`/browser`):** The shared Chromium browser exposes Chrome DevTools Protocol (`127.0.0.1:9222`) to AI sessions through `browser_status`, `browser_navigate`, `browser_click`, `browser_type`, `browser_press`, `browser_snapshot`, `browser_screenshot`, and `browser_eval`, broadcasting a live activity indicator on `/browser` while an agent drives the page.
 
 ### Workspace
 
@@ -250,13 +280,14 @@ services, the root helper) need a real install.
 
 ```
 apps/
-  server/         HTTP API, WebSockets, SQLite migrations, admin CLI
-  agent/          per-member agent: Claude Code, terminals, services, files, git
-  web/            the web app
+  server/         HTTP API, WebSockets, SQLite migrations, admin CLI, Dokploy/Monitor/Browser bridges
+  agent/          per-member agent: Claude Code, Multi-CLI (OpenCode/OpenRouter/Codex/Antigravity/Grok), terminals, services
+  web/            the web app (including /hosting, /monitor, /browser, and Multi-CLI launcher)
+  hosting/        bundled Dokploy PaaS engine (port 3010, Traefik 8880/8843, agOS monochrome theme)
   shell/          Tauri desktop and mobile apps (Kotlin and Swift additions in android/ and plugins/)
 packages/
-  claude-plugin/  MCP tools and skills DevDash gives to Claude Code
-deploy/           host bootstrap, installer, systemd units, Caddyfile, root helper, deploy scripts
+  claude-plugin/  MCP tools and skills DevDash gives to Claude Code & other AI CLIs
+deploy/           host bootstrap, installer, Dokploy installer (hosting-install.sh), systemd units, Caddyfile, root helper
 ```
 
 ## Security

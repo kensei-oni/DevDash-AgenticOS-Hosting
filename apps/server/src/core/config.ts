@@ -22,6 +22,8 @@ export type Config = {
    * private: to see its commits, deploy them, and serve the app's releases. Null for a public repository.
    */
   githubToken: string | null
+  /** Hosting (the bundled Dokploy, apps/hosting): see modules/hosting/service.ts. */
+  hosting?: { url: string; apiKey: string | null; domain: string | null; dashboardUrl: string | null }
 }
 
 function need(name: string): string {
@@ -56,5 +58,11 @@ export function loadConfig(): Config {
     version: pkg.version,
     repo: repo(process.env.DEVDASH_REPO || 'abdvlrqhman/DevDash-AgenticOS'),
     githubToken: process.env.DEVDASH_GITHUB_TOKEN?.trim() || null,
+    hosting: {
+      url: process.env.DEVDASH_HOSTING_URL?.trim() || 'http://127.0.0.1:3010',
+      apiKey: process.env.DEVDASH_HOSTING_API_KEY?.trim() || null,
+      domain: process.env.DEVDASH_HOSTING_DOMAIN?.trim().replace(/^\*?\./, '') || null,
+      dashboardUrl: process.env.DEVDASH_HOSTING_DASHBOARD_URL?.trim() || null,
+    },
   }
 }

@@ -53,6 +53,10 @@ import { terminalsService } from './modules/terminals/service.ts'
 import { teamPlugin } from './modules/team/index.ts' // Team (optional)
 import { reviewsRoutes } from './modules/reviews/routes.ts'
 import { reviewsService } from './modules/reviews/service.ts'
+import { hostingRoutes, type AnalyzeWithClaude, type AskClaude } from './modules/hosting/routes.ts'
+import { hostingService } from './modules/hosting/service.ts'
+import { monitorRoutes, type AskMonitorClaude } from './modules/monitor/routes.ts'
+import { monitorService } from './modules/monitor/service.ts'
 
 export function createApp({ db, config }: { db: Db; config: Config }) {
   const auth = authService({ db, masterKey: config.masterKey, spaceName: config.spaceName })
@@ -111,6 +115,54 @@ export function createApp({ db, config }: { db: Db; config: Config }) {
     if (t.status !== 'in_progress') tasks.update({ user }, slug, number, { status: 'in_progress', assignee: t.assignee?.id ?? user.id })
     return { sessionId: s.id }
   }
+  // Hosting (bundled Dokploy beside agOS) and its real Claude Code paths:
+  const hosting = hostingService({
+    config: {
+      ...(config.hosting ?? { url: 'http://127.0.0.1:3010', apiKey: null, domain: null, dashboardUrl: null }),
+      masterKey: config.masterKey.toString('base64'),
+    },
+    agents,
+    db,
+  })
+  const askClaude: AskClaude = async (user, prompt) => {
+    const d = claude.defaults(user) as { profile: string; model: string | null; effort: string | null; permission_mode: string } | undefined
+    const s = await claude.create(user, {
+      prompt: [
+        prompt.trim(),
+        'You have full access to the bundled Dokploy hosting engine via the DevDash hosting MCP tools (`hosting_status`, `hosting_list`, `hosting_get`, `hosting_logs`, `hosting_create`, `hosting_update`, `hosting_domain_add`, `hosting_domain_remove`, `hosting_action`). Check `hosting_status` first, perform the requested create/edit/deploy action, and verify with `hosting_get` / `hosting_logs`.',
+      ].join('\n\n'),
+      images: [], cwd: '', profile: d?.profile ?? 'default', model: d?.model ?? null, effort: d?.effort ?? null,
+      permissionMode: d?.permission_mode ?? 'bypassPermissions', mode: 'chat',
+    })
+    return { sessionId: s.id }
+  }
+  const analyzeWithClaude: AnalyzeWithClaude = async (user, deploymentId, meta) => {
+    const logText = await hosting.logs(deploymentId).catch((e: Error) => `Could not fetch log directly (${e.message}); call hosting_logs with deployment_id="${deploymentId}".`)
+    const d = claude.defaults(user) as { profile: string; model: string | null; effort: string | null; permission_mode: string } | undefined
+    const appCtx = meta?.appId ? `for hosted ${meta.kind ?? 'application'} "${meta.appName ?? meta.appId}" (id: ${meta.appId}, kind: ${meta.kind ?? 'application'}) ` : ''
+    const s = await claude.create(user, {
+      prompt: [
+        `Analyze the deployment logs ${appCtx}(deployment_id: \`${deploymentId}\`) from the bundled Dokploy engine, explain the root cause of any build or runtime errors, and if changes are needed, inspect the app with \`hosting_get\`, update its configuration/env/build settings with \`hosting_update\`, and trigger a redeploy with \`hosting_action\`.`,
+        '```log\n' + logText.slice(-12_000) + '\n```',
+      ].join('\n\n'),
+      images: [], cwd: '', profile: d?.profile ?? 'default', model: d?.model ?? null, effort: d?.effort ?? null,
+      permissionMode: d?.permission_mode ?? 'bypassPermissions', mode: 'chat',
+    })
+    return { sessionId: s.id }
+  }
+  const monitor = monitorService({ hosting, agents })
+  const askMonitorClaude: AskMonitorClaude = async (user, prompt) => {
+    const d = claude.defaults(user) as { profile: string; model: string | null; effort: string | null; permission_mode: string } | undefined
+    const s = await claude.create(user, {
+      prompt: [
+        prompt.trim(),
+        'Use `hosting_monitor`, `hosting_list`, `hosting_get`, `hosting_logs`, and `services_list` to inspect live server CPU, memory, disk, network throughput, and Docker/Dokploy containers, then diagnose or resolve the issue.',
+      ].join('\n\n'),
+      images: [], cwd: '', profile: d?.profile ?? 'default', model: d?.model ?? null, effort: d?.effort ?? null,
+      permissionMode: d?.permission_mode ?? 'bypassPermissions', mode: 'chat',
+    })
+    return { sessionId: s.id }
+  }
   const previews = servicePages({ db, auth, origin: config.origin, port: config.servicesPort })
   const services = servicesService({ db, agents, hub, notify: notifications.notify, previewUrl: previews.urlOf, basePath: previews.basePathOf })
   hub.authorize('services', () => true)
@@ -119,7 +171,19 @@ export function createApp({ db, config }: { db: Db; config: Config }) {
 
   const builds = buildsService({ db, agents, projects, shares })
   const vault = vaultService({ db })
-  const browser = browserService({ db, runDir: config.runDir, dataDir: config.dataDir, masterKey: config.masterKey, origin: config.origin })
+  const browser = browserService({ db, runDir: config.runDir, dataDir: config.dataDir, masterKey: config.masterKey, origin: config.origin, hub, agents })
+  const askBrowserClaude = async (user: Parameters<AskClaude>[0], prompt: string) => {
+    const d = claude.defaults(user) as { profile: string; model: string | null; effort: string | null; permission_mode: string } | undefined
+    const s = await claude.create(user, {
+      prompt: [
+        prompt.trim(),
+        'Drive the shared browser in real time using the built-in browser MCP tools (`browser_status`, `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_press`, `browser_screenshot`, `browser_eval`). Start by checking `browser_status` or navigating with `browser_navigate`, inspect interactive elements with `browser_snapshot`, and perform the requested actions live.',
+      ].join('\n\n'),
+      images: [], cwd: '', profile: d?.profile ?? 'default', model: d?.model ?? null, effort: d?.effort ?? null,
+      permissionMode: d?.permission_mode ?? 'bypassPermissions', mode: 'chat',
+    })
+    return { sessionId: s.id }
+  }
   // "Ready to review": a role's approved code proposal, finished with commits, ships in one tap. Team detects it (it has
   // the proposal context) and calls reviews.record; the claude module never imports Team.
   reviews = reviewsService({ db, hub, agents, projects, notify: notifications.notify, onMerged: (d, commit) => team?.service?.noteDeliveryMerged(d.session_id, commit) })
@@ -188,8 +252,10 @@ export function createApp({ db, config }: { db: Db; config: Config }) {
     .route('/api/tailnet', tailnetRoutes(tailnet, mw))
     .route('/api/storage', storageRoutes(storage, mw))
     .route('/api/pins', pinsRoutes(pins, mw))
-    .route('/api/browser', browserRoutes(browser, mw))
+    .route('/api/browser', browserRoutes(browser, mw, askBrowserClaude))
     .route('/api/status', statusRoutes(status, deploys, mw))
+    .route('/api/hosting', hostingRoutes(hosting, askClaude, analyzeWithClaude, mw))
+    .route('/api/monitor', monitorRoutes(monitor, askMonitorClaude, mw))
     .route('/api/team', team.routes) // Team
     .route('/api', reviewsRoutes(reviews, mw)) // "Ready to review" deliveries
     .route('/api', searchRoutes({ db, search, notes, projects, claude, services, activity }, mw))
@@ -205,6 +271,9 @@ export function createApp({ db, config }: { db: Db; config: Config }) {
   registerMcp({ db, agents, projects, tasks, notes, services, authorRole: (u, s) => team?.service?.roleOf(u, s)?.r.name ?? null })
   reviews.registerMcp()
   deploys.registerMcp()
+  hosting.registerMcp()
+  browser.registerMcp()
+  monitor.registerMcp()
   deploys.resume()
   projects.start()
   return { app, auth, provisioning, terms, agents, claude, services, projects, tasks, notes, hub, previews }

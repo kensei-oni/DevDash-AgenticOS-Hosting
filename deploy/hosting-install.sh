@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# agOS Hosting: installs the bundled Dokploy (apps/hosting) next to DevDash without touching its ports.
+#
+#   DevDash/Caddy : 80, 443 (DevDash), 8443 (services site), 8787 (DevDash API, local), 8090 (browser, local)
+#   Dokploy       : 3010  (dashboard + API; firewalled, reach it via Caddy :3443 or an SSH tunnel)
+#   Traefik       : 8880 (http) / 8843 (https)   <- Dokploy's router for hosted apps; Caddy forwards to it
+#
+# Usage:  sudo bash deploy/hosting-install.sh            (build the patched image from apps/hosting)
+#         sudo HOSTING_IMAGE=dokploy/dokploy:latest bash deploy/hosting-install.sh   (official image, same ports via env)
+#         sudo HOSTING_DOMAIN=apps.example.com bash deploy/hosting-install.sh   (also route *.apps.example.com through Caddy)
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+DOKPLOY_PORT="${DOKPLOY_PORT:-3010}"
+TRAEFIK_PORT="${TRAEFIK_PORT:-8880}"
+TRAEFIK_SSL_PORT="${TRAEFIK_SSL_PORT:-8843}"
+IMAGE="${HOSTING_IMAGE:-agos/dokploy:local}"
+ENV_FILE="${DEVDASH_ENV_FILE:-/etc/devdash/devdash.env}"
+
+[ "$(id -u)" = 0 ] || { echo "Run as root (sudo)." >&2; exit 1; }
+
+busy() { ss -ltnH "( sport = :$1 )" 2>/dev/null | grep -q .; }
+for p in "$DOKPLOY_PORT" "$TRAEFIK_PORT" "$TRAEFIK_SSL_PORT"; do
+  if busy "$p" && ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qE '^(dokploy|dokploy-traefik)'; then
+    echo "Port $p is already in use. Pick another with DOKPLOY_PORT / TRAEFIK_PORT / TRAEFIK_SSL_PORT." >&2; exit 1
+  fi
+done
+
+if ! command -v docker >/dev/null; then
+  echo "Installing Docker..."
+  curl -fsSL https://get.docker.com | sh
+fi
+
+ADVERTISE_ADDR="${ADVERTISE_ADDR:-$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')}"
+docker info --format '{{.Swarm.LocalNodeState}}' | grep -q active || docker swarm init --advertise-addr "$ADVERTISE_ADDR"
+docker network inspect dokploy-network >/dev/null 2>&1 || docker network create --driver overlay --attachable dokploy-network
+
+mkdir -p /etc/dokploy && chmod 777 /etc/dokploy
+
+if [ "$IMAGE" = "agos/dokploy:local" ]; then
+  echo "Building the hosting engine from apps/hosting (a few minutes)..."
+  docker build -t "$IMAGE" "$HERE/apps/hosting"
+fi
+
+PG_PASS_FILE=/etc/dokploy/.pg_password
+[ -s "$PG_PASS_FILE" ] || (openssl rand -hex 24 > "$PG_PASS_FILE" && chmod 600 "$PG_PASS_FILE")
+docker secret inspect dokploy_postgres_password >/dev/null 2>&1 || docker secret create dokploy_postgres_password "$PG_PASS_FILE"
+
+docker service inspect dokploy-postgres >/dev/null 2>&1 || docker service create --name dokploy-postgres \
+  --constraint 'node.role==manager' --network dokploy-network \
+  --env POSTGRES_USER=dokploy --env POSTGRES_DB=dokploy \
+  --secret source=dokploy_postgres_password,target=/run/secrets/postgres_password \
+  --env POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
+  --mount type=volume,source=dokploy-postgres,target=/var/lib/postgresql/data postgres:16
+
+docker service inspect dokploy-redis >/dev/null 2>&1 || docker service create --name dokploy-redis \
+  --constraint 'node.role==manager' --network dokploy-network \
+  --mount type=volume,source=dokploy-redis,target=/data redis:7
+
+MASTER_KEY="${DEVDASH_MASTER_KEY:-}"
+if [ -z "$MASTER_KEY" ] && [ -f "$ENV_FILE" ]; then
+  MASTER_KEY="$(grep '^DEVDASH_MASTER_KEY=' "$ENV_FILE" | head -n1 | cut -d= -f2-)"
+fi
+
+ENVS=(--env ADVERTISE_ADDR="$ADVERTISE_ADDR" --env PORT="$DOKPLOY_PORT"
+      --env TRAEFIK_PORT="$TRAEFIK_PORT" --env TRAEFIK_SSL_PORT="$TRAEFIK_SSL_PORT" --env TRAEFIK_HTTP3_PORT="$TRAEFIK_SSL_PORT"
+      --env POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password)
+[ -n "$MASTER_KEY" ] && ENVS+=(--env DEVDASH_MASTER_KEY="$MASTER_KEY")
+if docker service inspect dokploy >/dev/null 2>&1; then
+  docker service update --image "$IMAGE" "${ENVS[@]/--env/--env-add}" dokploy
+else
+  docker service create --name dokploy --replicas 1 --network dokploy-network \
+    --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
+    --mount type=bind,source=/etc/dokploy,target=/etc/dokploy \
+    --mount type=volume,source=dokploy,target=/root/.docker \
+    --secret source=dokploy_postgres_password,target=/run/secrets/postgres_password \
+    --publish published="$DOKPLOY_PORT",target="$DOKPLOY_PORT",mode=host \
+    --update-parallelism 1 --update-order stop-first --constraint 'node.role == manager' \
+    "${ENVS[@]}" "$IMAGE"
+fi
+
+# Keep Dokploy's ports off the internet: Caddy is the only door (ufw is what DevDash's installer sets up).
+if command -v ufw >/dev/null && ufw status | grep -q active; then
+  ufw deny "$DOKPLOY_PORT"/tcp >/dev/null || true
+  ufw deny "$TRAEFIK_PORT"/tcp >/dev/null || true
+  ufw deny "$TRAEFIK_SSL_PORT"/tcp >/dev/null || true
+  ufw allow 3443/tcp >/dev/null || true
+fi
+
+# Caddy: Dokploy's dashboard on https://<space>:3443, and hosted apps on *.<HOSTING_DOMAIN> (TLS at Caddy).
+if [ -d /etc/caddy ]; then
+  {
+    echo "# Generated by deploy/hosting-install.sh"
+    echo "{\$DEVDASH_DOMAIN}:3443 {"
+    echo "	import /etc/caddy/devdash-tls.caddy"
+    echo "	reverse_proxy 127.0.0.1:$DOKPLOY_PORT"
+    echo "}"
+    if [ -n "${HOSTING_DOMAIN:-}" ]; then
+      echo "*.${HOSTING_DOMAIN} {"
+      echo "	import /etc/caddy/devdash-tls.caddy"
+      echo "	encode zstd gzip"
+      echo "	reverse_proxy 127.0.0.1:$TRAEFIK_PORT"
+      echo "}"
+    fi
+  } > /etc/caddy/devdash-hosting.caddy
+  systemctl reload caddy || true
+fi
+
+# Tell agOS where the engine is (the API key comes after you create it in the dashboard).
+if [ -f "$ENV_FILE" ]; then
+  grep -q '^DEVDASH_HOSTING_URL=' "$ENV_FILE" || echo "DEVDASH_HOSTING_URL=http://127.0.0.1:$DOKPLOY_PORT" >> "$ENV_FILE"
+  DOMAIN_LINE=$(grep '^DEVDASH_ORIGIN=' "$ENV_FILE" | cut -d= -f2- | sed -E 's#^https?://##; s#/.*##')
+  [ -n "$DOMAIN_LINE" ] && ! grep -q '^DEVDASH_HOSTING_DASHBOARD_URL=' "$ENV_FILE" && echo "DEVDASH_HOSTING_DASHBOARD_URL=https://$DOMAIN_LINE:3443" >> "$ENV_FILE"
+  [ -n "${HOSTING_DOMAIN:-}" ] && ! grep -q '^DEVDASH_HOSTING_DOMAIN=' "$ENV_FILE" && echo "DEVDASH_HOSTING_DOMAIN=$HOSTING_DOMAIN" >> "$ENV_FILE"
+fi
+
+cat <<EOF
+
+Hosting engine is starting (first boot runs migrations; give it a minute).
+  1. Open the Dokploy dashboard (https://<your space>:3443, or: ssh -L $DOKPLOY_PORT:127.0.0.1:$DOKPLOY_PORT <server>
+     then http://localhost:$DOKPLOY_PORT) and create the admin account.
+  2. Settings > API Keys > create one, then add to $ENV_FILE:
+       DEVDASH_HOSTING_API_KEY=<key>
+  3. sudo systemctl restart devdash   -> the Hosting page in agOS lights up, and Claude gets the hosting_* tools.
+EOF

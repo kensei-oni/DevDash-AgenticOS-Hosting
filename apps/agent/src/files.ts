@@ -9,13 +9,18 @@ import { send } from './tmux.ts'
 // plus /tmp, where Claude often leaves screenshots and builds. Linux permissions apply on top; paths are resolved
 // (symlinks included) and must stay inside one of these.
 const SRV = process.env.DEVDASH_PROJECTS_ROOT || '/srv/devdash'
+const norm = (x: string) => x.replace(/\\/g, '/')
+const isFullPath = (p: unknown): p is string => typeof p === 'string' && (p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p))
 export const roots = () => [
-  { id: 'home', label: 'Home', path: homedir() },
+  { id: 'home', label: 'Home', path: norm(homedir()) },
   { id: 'projects', label: 'Projects', path: `${SRV}/projects` },
   { id: 'worktrees', label: 'Worktrees', path: `${SRV}/worktrees` },
   { id: 'shared', label: 'Shared', path: `${SRV}/files` },
 ]
-const inside = (p: string) => [...roots().map((r) => r.path), '/tmp'].some((r) => p === r || p.startsWith(`${r}/`))
+const inside = (p: string) => {
+  const np = norm(p)
+  return [...roots().map((r) => norm(r.path)), '/tmp'].some((r) => np === r || np.startsWith(`${r}/`))
+}
 
 const FIND_SKIP = new Set(['node_modules', '.git', '.godot', '.gradle', '.cache', '.venv', 'venv', '__pycache__', '.tools', '.next', 'target', '.pub-cache', '.dart_tool'])
 const FIND_DEPTH = 6
@@ -24,7 +29,7 @@ const FIND_ENTRIES = 50_000
 
 /** An existing path, after symlinks. */
 async function existing(p: unknown) {
-  if (typeof p !== 'string' || !p.startsWith('/')) throw new Error('Use a full path.')
+  if (!isFullPath(p)) throw new Error('Use a full path.')
   const real = await realpath(p).catch(() => null)
   if (!real) throw new Error('That file or folder does not exist.')
   if (!inside(real)) throw new Error('That is outside the folders DevDash can show.')
@@ -32,7 +37,7 @@ async function existing(p: unknown) {
 }
 /** A path that may not exist yet: its folder must exist and be allowed; the name must be plain. */
 async function creatable(p: unknown) {
-  if (typeof p !== 'string' || !p.startsWith('/')) throw new Error('Use a full path.')
+  if (!isFullPath(p)) throw new Error('Use a full path.')
   const name = basename(p)
   if (!name || name === '.' || name === '..' || name.includes('\0')) throw new Error('Choose another name.')
   return join(await existing(dirname(resolve(p))), name)
@@ -120,18 +125,18 @@ export const ops = {
 
   /** Creates a folder and any missing parents, inside the member's folders (a new session's own folder). */
   async mkdirp(r: Record<string, unknown>) {
-    if (typeof r.path !== 'string' || !r.path.startsWith('/')) throw new Error('Use a full path.')
+    if (!isFullPath(r.path)) throw new Error('Use a full path.')
     const target = resolve(r.path)
     let base = target
     while (!(await lstat(base).catch(() => null))) base = dirname(base)
     if (!inside(await realpath(base))) throw new Error('That is outside the folders DevDash can show.')
     await mkdir(target, { recursive: true })
-    return { path: target }
+    return { path: norm(target) }
   },
 
   /** Whether a shared file is still there (share links stop working once their file is gone). */
   async exists(r: Record<string, unknown>) {
-    if (typeof r.path !== 'string' || !r.path.startsWith('/')) throw new Error('Use a full path.')
+    if (!isFullPath(r.path)) throw new Error('Use a full path.')
     const real = await realpath(r.path).catch(() => null)
     return { exists: !!real && inside(real) }
   },

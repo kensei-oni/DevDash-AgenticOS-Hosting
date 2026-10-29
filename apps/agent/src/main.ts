@@ -8,6 +8,7 @@ import { createServer, type Socket } from 'node:net'
 import { promisify } from 'node:util'
 import { createInterface } from 'node:readline'
 import * as claude from './claude.ts'
+import * as aiClis from './ai-clis.ts'
 import * as services from './services.ts'
 import * as tailscale from './tailscale.ts'
 import * as storage from './storage.ts'
@@ -46,6 +47,12 @@ async function ensureTerminal(name: string, cols: number, rows: number) {
   if (name.startsWith('login-')) {
     const { env, args } = claude.loginCommand(name.slice(6))
     return void (await tmux(...base, ...Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]), ...args))
+  }
+  if (name.startsWith('cli-')) {
+    const spec = aiClis.cliTerminalLaunch(name.slice(4))
+    if (spec) {
+      return void (await tmux(...base, ...Object.entries(spec.env).flatMap(([k, v]) => ['-e', `${k}=${v}`]), 'bash', '-lc', spec.script))
+    }
   }
   await tmux(...base)
 }
@@ -110,6 +117,9 @@ const ops: Record<string, (r: Req) => Promise<unknown> | unknown> = {
   'claude.memory.restart': async () => (await memory.restart(claude.profileNames()), { ok: true }),
   'claude.usage': async (r) => ({ usage: await claude.usage(str(r.profile, 'profile')) }),
   'claude.profile.create': (r) => (claude.createProfile(str(r.name, 'name')), { ok: true }),
+  'ai.clis.status': () => aiClis.listCliStatuses(),
+  'ai.clis.configure': (r) => ({ config: aiClis.writeCliConfig((r.config ?? {}) as aiClis.CliConfigStore) }),
+  'ai.clis.install': (r) => aiClis.installCli(str(r.id, 'id') as aiClis.CliId),
   'fs.dir': async (r) => ({ path: await services.dir(r.path) }),
   'fs.roots': () => files.ops.roots(),
   'fs.first': (r) => files.ops.first(r),

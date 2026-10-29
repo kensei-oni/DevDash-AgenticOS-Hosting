@@ -15,6 +15,7 @@ import { getPorts } from './tailscale.ts'
 import { startForwarder, writeSshHelper } from './tailnet-session.ts'
 import * as storage from './storage.ts'
 import { guestMay } from './guest.ts'
+import { cliEnv } from './ai-clis.ts'
 
 export const PLUGIN_DIR = fileURLToPath(new URL('../../../packages/claude-plugin', import.meta.url))
 export const PROFILE_RE = /^[a-z0-9][a-z0-9-]{0,20}$/
@@ -92,7 +93,13 @@ type TailnetSetup = { env: Record<string, string>; mcpServers?: Record<string, u
  * SDK's traffic would tunnel through the proxy and break. Returns null when routing is off.
  */
 async function setupTailnet(l: Launch): Promise<TailnetSetup | null> {
-  if (!l.reachTailnet) { teardownTailnet(l.id); return null }
+  if (!l.reachTailnet) {
+    teardownTailnet(l.id)
+    if (!l.tailnetMcps?.length) return null
+    let mcpServers: Record<string, unknown> | undefined
+    for (const mcp of l.tailnetMcps) mcpServers = { ...mcpServers, [mcp.name]: { type: 'http', url: mcp.url } }
+    return { env: {}, mcpServers }
+  }
   const { socksPort, httpPort } = await getPorts()
   const binDir = join(homedir(), '.cache', 'devdash', 'tailnet', l.id)
   await writeSshHelper(binDir, socksPort)
@@ -162,7 +169,10 @@ class Inbox implements AsyncIterable<SDKUserMessage> {
 }
 
 export const profileDir = (p: string) => (p === 'default' ? join(homedir(), '.claude') : join(homedir(), '.claude-profiles', p))
-export const profileEnv = (p: string): Record<string, string> => (p === 'default' ? {} : { CLAUDE_CONFIG_DIR: profileDir(p) })
+export const profileEnv = (p: string): Record<string, string> => ({
+  ...(p === 'default' ? {} : { CLAUDE_CONFIG_DIR: profileDir(p) }),
+  ...cliEnv(p),
+})
 
 function validate(l: Launch) {
   if (!ID_RE.test(l.id)) throw new Error('invalid session id')
@@ -188,6 +198,10 @@ Long-running processes (web servers, dev servers, APIs, workers, containers) go 
 - \`devdash service logs <name>\`, \`restart <name>\`, \`stop <name>\`, \`rm <name>\`. Options for add: \`--env KEY=value\`, \`--no-autostart\`, \`--no-restart\`. Services keep running after this session ends, start with the server and restart if they crash.
 - Each service opens in the browser at $DEVDASH_URL (members only, or anyone with the link if made public); \`devdash service add\` prints it. Apps that build absolute URLs should use the base path $DEVDASH_BASE_PATH (Vite: \`--base $DEVDASH_BASE_PATH\`).
 - Services you add are linked to this session. Only stop or change services that belong to this person.
+Production Hosting (Dokploy beside agOS), Server Monitoring & Live Browser Control are built into every normal session as MCP tools:
+- Hosting (Dokploy at 127.0.0.1:3010): use \`hosting_status\`, \`hosting_list\`, \`hosting_get\`, \`hosting_logs\`, \`hosting_create\` (create and deploy git repos, Docker images, or compose stacks with domains), \`hosting_update\` (edit a hosted app's git repo/branch/buildPath, buildType/dockerfile, dockerImage, composeFile, env, command, or name, and optionally redeploy), \`hosting_domain_add\`, \`hosting_domain_remove\`, and \`hosting_action\` (\`deploy\`, \`redeploy\`, \`stop\`, \`start\`, \`delete\`). You can also run \`devdash host ls|create|update|logs|deploy|redeploy|stop|start\` in Bash.
+- Server & Container Monitoring: use \`hosting_monitor\` to inspect live CPU, RAM, swap, disk, network throughput, and Docker/Dokploy container metrics on this server.
+- Real-Time Shared Browser: use \`browser_status\`, \`browser_navigate\`, \`browser_click\`, \`browser_type\`, \`browser_press\`, \`browser_snapshot\`, \`browser_screenshot\`, and \`browser_eval\` to drive the live shared browser in real time while the user watches on the Browser page.
 Be light on the shared machine — its disk and CPU are limited and used by everyone:
 - Don't duplicate large things. When you work on a branch in a worktree, never re-download a big toolchain into it (node_modules, Android/Flutter SDKs, gradle/pub caches): reuse the project's main checkout — symlink it (\`ln -sfn <main-checkout>/node_modules node_modules\`) or point the tool at a shared cache (GRADLE_USER_HOME, ANDROID_SDK_ROOT, PUB_CACHE, npm cache) instead of a per-worktree copy.
 - Clean up build outputs and scratch files you don't need; write throwaway files under /tmp, not into the repo. Worktrees are temporary — DevDash removes abandoned ones automatically once they're stale and their work is merged, so commit or merge anything you want to keep.
@@ -880,6 +894,10 @@ export async function rename(l: Launch, title: string) {
 }
 
 async function authStatus(name: string) {
+  const extra = cliEnv(name)
+  if (name === 'openrouter' && extra.OPENROUTER_API_KEY) {
+    return { name, loggedIn: true, authMethod: 'apiKey', email: 'OpenRouter API', plan: extra.ANTHROPIC_MODEL ?? 'openrouter' }
+  }
   try {
     const { stdout } = await run(CLAUDE_BIN, ['auth', 'status', '--json'], { env: { ...process.env, ...profileEnv(name) }, timeout: 20_000 })
     const s = JSON.parse(stdout) as { loggedIn?: boolean; authMethod?: string; email?: string; subscriptionType?: string }
